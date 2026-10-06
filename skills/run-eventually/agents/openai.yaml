@@ -1,0 +1,3 @@
+interface:
+  display_name: "Run Eventually"
+  short_description: "Schedule local commands that wait until ready"

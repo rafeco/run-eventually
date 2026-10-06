@@ -36,3 +36,21 @@ and end-to-end checks.
 This is a development preview. Automatic login startup, task editing in the app,
 reusable VPN and Google Cloud checks, browser-assisted sign-in, MCP, and signed
 distribution are still to be built.
+
+## Agent skill
+
+The [Run Eventually skill](skills/run-eventually/SKILL.md) lets agents configure
+tasks from other project sessions through the current CLI. It discovers the local
+executable, checks existing tasks, configures environments and readiness checks,
+and verifies saved definitions. It does not install or start the scheduler.
+MCP support is planned; the skill works without it.
+
+To install from this checkout, copy `skills/run-eventually` into your personal
+Codex skills directory (`$CODEX_HOME/skills`, or `~/.codex/skills` by default).
+Preserve any existing skill with that name rather than blindly overwriting it.
+The installed skill is available on the next turn. Invoke it as `$run-eventually`
+or ask, “Use Run Eventually to run this project's FX refresh every morning at
+7 Eastern.”
+
+If the executable is outside the usual app or development locations, provide its
+absolute path in the session or set `RUN_EVENTUALLY_CLI` for skill discovery.
