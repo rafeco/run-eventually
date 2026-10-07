@@ -24,3 +24,4 @@ else
 fi
 
 swift run --disable-sandbox run-eventually-verify
+/usr/bin/python3 scripts/test-dev-restart.py

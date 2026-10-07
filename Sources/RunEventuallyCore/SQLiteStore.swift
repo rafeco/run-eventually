@@ -4,6 +4,8 @@ import SQLite3
 public enum SQLiteStoreError: Error, LocalizedError {
     case database(code: Int32, message: String)
     case missingTask(UUID)
+    case taskPaused
+    case outcomeNeedsReview
 
     public var errorDescription: String? {
         switch self {
@@ -11,6 +13,10 @@ public enum SQLiteStoreError: Error, LocalizedError {
             return "SQLite error \(code): \(message)"
         case let .missingTask(id):
             return "Task \(id) does not exist"
+        case .taskPaused:
+            return "Resume the task before requesting a run."
+        case .outcomeNeedsReview:
+            return "The previous run has an unknown outcome. Resolve it before requesting another run."
         }
     }
 }
@@ -69,6 +75,19 @@ public final class SQLiteStore: @unchecked Sendable {
                 """)
             try execute("CREATE INDEX IF NOT EXISTS runs_by_task ON runs(task_id, created_at)")
             try execute("""
+                CREATE TABLE IF NOT EXISTS scheduler_runtime (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    payload BLOB NOT NULL
+                )
+                """)
+            try execute("""
+                CREATE TABLE IF NOT EXISTS activity (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scheduler_session TEXT,
+                    payload BLOB NOT NULL
+                )
+                """)
+            try execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS one_pending_run_per_task
                 ON runs(task_id) WHERE state = 'pending'
                 """)
@@ -89,17 +108,81 @@ public final class SQLiteStore: @unchecked Sendable {
 
     public func insertTask(_ task: TaskDefinition) throws {
         try lock.withLock {
-            let statement = try prepare("INSERT INTO tasks(id, created_at, payload) VALUES (?, ?, ?)")
-            defer { sqlite3_finalize(statement) }
-            try bind(task.id.uuidString, to: statement, at: 1)
-            try bind(task.createdAt.timeIntervalSince1970, to: statement, at: 2)
-            try bind(encoder.encode(task), to: statement, at: 3)
-            try stepDone(statement)
+            try transaction {
+                let statement = try prepare("INSERT INTO tasks(id, created_at, payload) VALUES (?, ?, ?)")
+                defer { sqlite3_finalize(statement) }
+                try bind(task.id.uuidString, to: statement, at: 1)
+                try bind(task.createdAt.timeIntervalSince1970, to: statement, at: 2)
+                try bind(encoder.encode(task), to: statement, at: 3)
+                try stepDone(statement)
+                try appendActivityUnlocked(ActivityEvent(
+                    kind: .taskCreated, message: task.isPaused ? "Task created paused." : "Task created and enabled.",
+                    taskID: task.id
+                ))
+            }
         }
     }
 
     public func updateTask(_ task: TaskDefinition) throws {
-        try lock.withLock { try saveTask(task) }
+        try lock.withLock {
+            try transaction {
+                let previous = try loadTask(id: task.id)
+                try saveTask(task)
+                let message = previous?.isPaused != task.isPaused
+                    ? (task.isPaused ? "Task paused. Running commands are unaffected." : "Task resumed.")
+                    : (previous?.check != task.check ? "Readiness check updated." : "Task definition updated.")
+                try appendActivityUnlocked(ActivityEvent(kind: .taskUpdated, message: message, taskID: task.id))
+            }
+        }
+    }
+
+    public func recordActivity(_ event: ActivityEvent) throws {
+        try lock.withLock { try transaction { try appendActivityUnlocked(event) } }
+    }
+
+    public func schedulerRuntime() throws -> SchedulerRuntime? {
+        try lock.withLock {
+            try readOne("SELECT payload FROM scheduler_runtime WHERE singleton = 1", as: SchedulerRuntime.self)
+        }
+    }
+
+    public func setSchedulerRuntime(_ runtime: SchedulerRuntime) throws {
+        try lock.withLock {
+            let statement = try prepare("INSERT OR REPLACE INTO scheduler_runtime(singleton, payload) VALUES (1, ?)")
+            defer { sqlite3_finalize(statement) }
+            try bind(encoder.encode(runtime), to: statement, at: 1)
+            try stepDone(statement)
+        }
+    }
+
+    public func clearSchedulerRuntime(sessionID: UUID) throws {
+        try lock.withLock {
+            try transaction {
+                let runtime = try readOne("SELECT payload FROM scheduler_runtime WHERE singleton = 1", as: SchedulerRuntime.self)
+                if runtime?.sessionID == sessionID { try execute("DELETE FROM scheduler_runtime") }
+            }
+        }
+    }
+
+    /// Newest first in insertion order, independent of wall-clock adjustments.
+    public func listActivity(limit: Int = 500, schedulerOnly: Bool = false) throws -> [ActivityEvent] {
+        try lock.withLock {
+            let count = min(max(limit, 1), 5_000)
+            let filter = schedulerOnly ? "WHERE scheduler_session IS NOT NULL" : ""
+            return try readMany("SELECT payload FROM activity \(filter) ORDER BY sequence DESC LIMIT \(count)", as: ActivityEvent.self)
+        }
+    }
+
+    private func appendActivityUnlocked(_ event: ActivityEvent) throws {
+        let statement = try prepare("INSERT INTO activity(scheduler_session, payload) VALUES (?, ?)")
+        defer { sqlite3_finalize(statement) }
+        if let session = event.schedulerSessionID {
+            try bind(session.uuidString, to: statement, at: 1)
+        }
+        try bind(encoder.encode(event), to: statement, at: 2)
+        try stepDone(statement)
+        // A bounded rolling history prevents minute polling from growing forever.
+        try execute("DELETE FROM activity WHERE sequence <= (SELECT MAX(sequence) - 5000 FROM activity)")
     }
 
     public func task(id: UUID) throws -> TaskDefinition? {
@@ -133,35 +216,114 @@ public final class SQLiteStore: @unchecked Sendable {
         try lock.withLock { try saveRun(run) }
     }
 
+    /// A check may finish after another client has coalesced more due work.
+    /// Update its blocker without overwriting the latest occurrence data.
+    public func recordCheckBlocker(runID: UUID, reason: String) throws {
+        try lock.withLock {
+            try transaction {
+                guard var run = try loadRun(id: runID), run.state == .pending else { return }
+                run.blockerReason = reason
+                run.lastCheckedAt = Date()
+                try saveRun(run)
+            }
+        }
+    }
+
     /// Records every due occurrence and advances the cursor in one transaction.
     /// Any number of missed occurrences become one pending run, including when a
     /// previous run is still in progress or has an unknown outcome.
     public func materializeDue(taskID: UUID, through now: Date) throws -> RunRecord? {
         try lock.withLock {
+            try transaction { try materializeDueUnlocked(taskID: taskID, through: now) }
+        }
+    }
+
+    /// Queues work without launching a process. Concurrent requests share a run;
+    /// overdue scheduled intent is materialized before creating manual work.
+    public func requestRun(taskID: UUID, at now: Date = Date()) throws -> RunRecord {
+        do {
+            return try performRunRequest(taskID: taskID, at: now)
+        } catch {
+            // Record rejection after the failed transaction rolls back and releases
+            // the connection lock, preserving the original error if logging fails.
+            try? recordActivity(ActivityEvent(kind: .runRequestRejected,
+                message: "Run now rejected: \(error.localizedDescription)", level: .warning, taskID: taskID))
+            throw error
+        }
+    }
+
+    private func performRunRequest(taskID: UUID, at now: Date) throws -> RunRecord {
+        try lock.withLock {
             try transaction {
-                guard var task = try loadTask(id: taskID), !task.isPaused else { return nil }
-                guard let due = try SchedulePlanner.dueWindow(
-                    for: task.schedule,
-                    after: task.scheduleCursor,
-                    through: now
-                ) else { return nil }
-
-                var pending = try loadPendingRun(taskID: taskID) ?? RunRecord(
+                guard let task = try loadTask(id: taskID) else {
+                    throw SQLiteStoreError.missingTask(taskID)
+                }
+                guard !task.isPaused else { throw SQLiteStoreError.taskPaused }
+                if let unresolved: RunRecord = try readOne(
+                    "SELECT payload FROM runs WHERE task_id = ? AND state IN ('starting', 'running', 'outcomeUnknown')",
+                    binding: { try self.bind(taskID.uuidString, to: $0, at: 1) },
+                    as: RunRecord.self
+                ) {
+                    guard unresolved.state != .outcomeUnknown else {
+                        throw SQLiteStoreError.outcomeNeedsReview
+                    }
+                    try appendActivityUnlocked(ActivityEvent(kind: .runRequested,
+                        message: "Run now reused the active run.", taskID: taskID, runID: unresolved.id))
+                    return unresolved
+                }
+                _ = try materializeDueUnlocked(taskID: taskID, through: now)
+                if let pending = try loadPendingRun(taskID: taskID) {
+                    try appendActivityUnlocked(ActivityEvent(kind: .runRequested,
+                        message: "Run now reused pending work; readiness checks still apply.", taskID: taskID, runID: pending.id))
+                    return pending
+                }
+                let manual = RunRecord(
                     taskID: taskID,
-                    firstScheduledAt: due.first,
-                    lastScheduledAt: due.last,
-                    occurrenceCount: 0
+                    firstScheduledAt: now,
+                    lastScheduledAt: now,
+                    occurrenceCount: 0,
+                    createdAt: now,
+                    trigger: .manual
                 )
-                pending.firstScheduledAt = min(pending.firstScheduledAt, due.first)
-                pending.lastScheduledAt = max(pending.lastScheduledAt, due.last)
-                pending.occurrenceCount += due.count
-                try saveRun(pending)
-
-                task.scheduleCursor = due.last
-                try saveTask(task)
-                return pending
+                try saveRun(manual)
+                try appendActivityUnlocked(ActivityEvent(kind: .runRequested,
+                    message: "Run now queued; readiness checks still apply.", taskID: taskID, runID: manual.id))
+                return manual
             }
         }
+    }
+
+    private func materializeDueUnlocked(taskID: UUID, through now: Date) throws -> RunRecord? {
+        guard var task = try loadTask(id: taskID), !task.isPaused else { return nil }
+        guard let due = try SchedulePlanner.dueWindow(
+            for: task.schedule,
+            after: task.scheduleCursor,
+            through: now
+        ) else { return nil }
+
+        var pending = try loadPendingRun(taskID: taskID) ?? RunRecord(
+            taskID: taskID,
+            firstScheduledAt: due.first,
+            lastScheduledAt: due.last,
+            occurrenceCount: 0
+        )
+        if pending.trigger == .manual {
+            pending.firstScheduledAt = due.first
+            pending.lastScheduledAt = due.last
+            pending.trigger = .scheduledAndManual
+        } else {
+            pending.firstScheduledAt = min(pending.firstScheduledAt, due.first)
+        }
+        pending.lastScheduledAt = max(pending.lastScheduledAt, due.last)
+        pending.occurrenceCount += due.count
+        try saveRun(pending)
+
+        task.scheduleCursor = due.last
+        try saveTask(task)
+        try appendActivityUnlocked(ActivityEvent(kind: .workDue,
+            message: "Scheduled work queued: \(pending.occurrenceCount) occurrence(s) in one pending run.",
+            taskID: taskID, runID: pending.id))
+        return pending
     }
 
     /// Only one attempt for a task may be in progress or awaiting an outcome.
@@ -196,6 +358,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 for var run in interrupted {
                     run.state = .outcomeUnknown
                     try saveRun(run)
+                    try appendActivityUnlocked(ActivityEvent(kind: .runRecovered,
+                        message: "Interrupted run has an unknown outcome. Review it before another execution.",
+                        level: .warning, taskID: run.taskID, runID: run.id))
                 }
             }
         }

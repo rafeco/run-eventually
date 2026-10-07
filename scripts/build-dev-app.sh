@@ -20,8 +20,10 @@ swift build --disable-sandbox
 app_dir="$project_dir/.build/RunEventually.app"
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS"
+mkdir -p "$app_dir/Contents/Resources"
 cp "$project_dir/.build/debug/run-eventually-desktop" "$app_dir/Contents/MacOS/"
 cp "$project_dir/.build/debug/run-eventually" "$app_dir/Contents/MacOS/"
+cp "$project_dir/Assets/AppIcon.icns" "$app_dir/Contents/Resources/"
 
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -30,6 +32,7 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleExecutable</key><string>run-eventually-desktop</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>com.rafeco.RunEventually</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>Run Eventually</string>

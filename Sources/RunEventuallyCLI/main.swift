@@ -16,12 +16,15 @@ Run Eventually — local scheduler prototype
 
 Usage:
   run-eventually [--database PATH] add-once ISO8601 NAME [--cwd PATH] [--env KEY=VALUE] -- EXECUTABLE [ARG ...]
-  run-eventually [--database PATH] add-daily HH:MM TIME_ZONE NAME [--cwd PATH] [--env KEY=VALUE] -- EXECUTABLE [ARG ...]
-  run-eventually [--database PATH] set-check TASK_ID [--cwd PATH] [--env KEY=VALUE] -- EXECUTABLE [ARG ...]
+  run-eventually [--database PATH] add-daily HH:MM TIME_ZONE NAME [--paused] [--cwd PATH] [--env KEY=VALUE] -- EXECUTABLE [ARG ...]
+  run-eventually [--database PATH] set-check TASK_ID [--timeout-seconds N] [--failure-message CODE=MESSAGE] [--cwd PATH] [--env KEY=VALUE] -- EXECUTABLE [ARG ...]
   run-eventually [--database PATH] pause TASK_ID
   run-eventually [--database PATH] resume TASK_ID
+  run-eventually [--database PATH] run-now TASK_ID
   run-eventually [--database PATH] list
   run-eventually [--database PATH] runs
+  run-eventually [--database PATH] activity
+  run-eventually version
   run-eventually [--database PATH] tick
   run-eventually [--database PATH] serve
 
@@ -121,10 +124,18 @@ private func main() throws {
             throw CLIError.usage("Unknown time zone: \(zone)")
         }
         let now = Date()
+        var commandArguments = Array(arguments.dropFirst(3))
+        var isPaused = false
+        if let separator = commandArguments.firstIndex(of: "--"),
+           let option = commandArguments[..<separator].firstIndex(of: "--paused") {
+            isPaused = true
+            commandArguments.remove(at: option)
+        }
         let definition = TaskDefinition(
             name: arguments[2],
-            command: try executable(from: Array(arguments.dropFirst(3))),
+            command: try executable(from: commandArguments),
             schedule: .daily(hour: hour, minute: minute, timeZoneID: zone),
+            isPaused: isPaused,
             scheduleCursor: now,
             createdAt: now
         )
@@ -138,7 +149,30 @@ private func main() throws {
         guard var task = try store.task(id: id) else {
             throw CLIError.usage("Task not found: \(id.uuidString)")
         }
-        task.check = CheckSpec(command: try executable(from: Array(arguments.dropFirst())))
+        var checkArguments = Array(arguments.dropFirst())
+        var timeout: TimeInterval = 10
+        var failureMessages: [String: String] = [:]
+        while let separator = checkArguments.firstIndex(of: "--"),
+              let option = checkArguments[..<separator].firstIndex(of: "--failure-message") {
+            guard option + 1 < separator else { throw CLIError.usage("Expected CODE=MESSAGE after --failure-message.") }
+            let pair = checkArguments[option + 1].split(separator: "=", maxSplits: 1)
+            guard pair.count == 2, let code = Int32(pair[0]), code != 0, !pair[1].isEmpty else {
+                throw CLIError.usage("Failure message must use a nonzero exit code and CODE=MESSAGE.")
+            }
+            failureMessages[String(code)] = String(pair[1])
+            checkArguments.removeSubrange(option...option + 1)
+        }
+        // Parse only options before the executable separator, leaving command arguments literal.
+        if let separator = checkArguments.firstIndex(of: "--"),
+           let option = checkArguments[..<separator].firstIndex(of: "--timeout-seconds") {
+            guard option + 1 < separator,
+                  let value = Double(checkArguments[option + 1]), value.isFinite, value > 0 else {
+                throw CLIError.usage("Check timeout must be a positive number of seconds.")
+            }
+            timeout = value
+            checkArguments.removeSubrange(option...option + 1)
+        }
+        task.check = CheckSpec(command: try executable(from: checkArguments), timeoutSeconds: timeout, failureMessages: failureMessages)
         try store.updateTask(task)
         print("Updated check for \(task.name)")
 
@@ -152,6 +186,11 @@ private func main() throws {
         task.isPaused = command == "pause"
         try store.updateTask(task)
         print("\(task.isPaused ? "Paused" : "Resumed") \(task.name)")
+
+    case "run-now":
+        guard arguments.count == 1 else { throw CLIError.usage(help) }
+        let run = try SQLiteStore(path: databasePath).requestRun(taskID: taskID(arguments[0]))
+        print("\(run.state.rawValue): \(run.id.uuidString). The scheduler checks pending work about once a minute.")
 
     case "list":
         guard arguments.isEmpty else { throw CLIError.usage(help) }
@@ -171,18 +210,39 @@ private func main() throws {
             print("\(run.id.uuidString)  \(run.state.rawValue)  due \(due)  count \(run.occurrenceCount)\(reason)")
         }
 
+    case "activity":
+        guard arguments.isEmpty else { throw CLIError.usage(help) }
+        let events = try SQLiteStore(path: databasePath).listActivity(limit: 200)
+        for event in events.reversed() {
+            let time = ISO8601DateFormatter().string(from: event.timestamp)
+            let task = event.taskID.map { " task=\($0.uuidString)" } ?? ""
+            print("\(time) [\(event.level.rawValue)] \(event.kind.rawValue)\(task): \(event.message)")
+        }
+
     case "tick", "serve":
         guard arguments.isEmpty else { throw CLIError.usage(help) }
         let scheduler = try Scheduler(databasePath: databasePath)
+        let signals = TerminationSignals(handler: scheduler.shutdownHandler())
+        defer { withExtendedLifetime(signals) {} }
+        try scheduler.announceGracefulShutdownSupport()
         repeat {
+            if scheduler.shutdown.isRequested { break }
             if let run = try scheduler.tick() {
                 print("\(run.state.rawValue): \(run.id.uuidString) (\(run.taskID.uuidString))")
                 if command == "serve" { continue }
             } else if command == "tick" {
                 print("No eligible run.")
             }
-            if command == "serve" { Thread.sleep(forTimeInterval: 60) }
+            if command == "serve" {
+                if scheduler.shutdown.isRequested { break }
+                try scheduler.recordWaiting(until: Date().addingTimeInterval(60))
+                scheduler.shutdown.wait(until: Date().addingTimeInterval(60))
+            }
         } while command == "serve"
+
+    case "version":
+        guard arguments.isEmpty, let executable = Bundle.main.executableURL else { throw CLIError.usage(help) }
+        print(try SchedulerRuntime.executableDigest(at: executable))
 
     case "help", "--help", "-h":
         print(help)

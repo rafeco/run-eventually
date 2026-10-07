@@ -13,17 +13,26 @@ assume all of it is implemented.
 - `Sources/RunEventuallyCore`: models, calendar planning, SQLite persistence,
   command execution, and scheduler reconciliation.
 - `Sources/RunEventuallyCLI`: prototype task management and `tick`/`serve`.
-- `Sources/RunEventuallyDesktop`: read-only task status, history, and logs.
+- `Sources/RunEventuallyDesktop`: task status, history, logs, and manual run requests.
+- The Activity window refreshes every second from persistent operational events;
+  keep events separate from command output and credentials. Retain 5,000 events
+  and use insertion order so clock changes do not reorder history.
 - `Sources/RunEventuallyVerification`: end-to-end verification executable.
 - `Tests/RunEventuallyCoreTests`: Swift Testing tests.
 - `scripts`: verification and local app packaging.
 
 The intended architecture has one per-user LaunchAgent scheduler, with the UI and
 a local MCP adapter communicating through a shared API over XPC. Startup
-registration, XPC, MCP, UI editing, reusable VPN/Google checks, and browser-assisted
+registration through SMAppService, XPC, MCP, UI editing, reusable VPN/Google checks, and browser-assisted
 authentication are not implemented yet. The prototype CLI writes task definitions
-directly to SQLite; the desktop reads it. Keep scheduling authority centralized
+directly to SQLite; the desktop reads it and transactionally queues manual runs.
+Only the scheduler launches commands. Keep scheduling authority centralized
 when introducing the service.
+
+`examples/pe-dashboard` provides a composite readiness check and a daily pipeline
+configuration. `scripts/install-dev-agent.sh` is a temporary per-user LaunchAgent
+bridge for development; it is not the planned bundled SMAppService integration.
+Run the example's Python unit tests when changing its readiness checks.
 
 macOS is the only current target. Keep implementation in Swift. Cross-task
 dependencies belong in creator-supplied scripts or Make targets rather than a
@@ -60,6 +69,7 @@ From the repository root:
 ```sh
 scripts/verify.sh
 scripts/build-dev-app.sh
+scripts/dev.sh
 ```
 
 Verification runs the Swift tests and end-to-end checks. The scripts accommodate
@@ -73,6 +83,15 @@ The scheduler currently runs separately:
 ```sh
 .build/RunEventually.app/Contents/MacOS/run-eventually serve
 ```
+
+Prefer `scripts/dev.sh` for iterative development: it builds and updates the
+development LaunchAgent and preview window together, verifies the running helper
+digest, and waits for active work to drain. SIGTERM/SIGINT stop new admissions and
+wake idle waits; already admitted operations finish before the scheduler exits.
+Do not replace this with `launchctl kickstart -k` or terminate active task children.
+Legacy helpers require an idle-only first upgrade. `scripts/test-dev-restart.py`
+tests subprocess shutdown and restart safety; `--launchd` opts into temporary
+LaunchAgent tests, using an isolated label and database.
 
 For manual tests, use a temporary database with `--database PATH` or
 `RUN_EVENTUALLY_DB`. The desktop accepts `RUN_EVENTUALLY_DB` when launching its

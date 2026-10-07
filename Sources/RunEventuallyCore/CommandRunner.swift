@@ -146,7 +146,9 @@ private final class BoundedOutput: @unchecked Sendable {
     func startDraining() {
         let descriptor = pipe.fileHandleForReading.fileDescriptor
         draining.enter()
-        DispatchQueue.global(qos: .utility).async { [self] in
+        // Readers must make progress even when callers occupy the cooperative
+        // Swift task pool while waiting synchronously for command completion.
+        Thread.detachNewThread { [self] in
             defer { draining.leave() }
             var buffer = [UInt8](repeating: 0, count: 8_192)
             while true {

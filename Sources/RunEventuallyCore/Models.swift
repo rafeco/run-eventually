@@ -27,10 +27,12 @@ public struct CommandSpec: Codable, Sendable, Equatable {
 public struct CheckSpec: Codable, Sendable, Equatable {
     public var command: CommandSpec
     public var timeoutSeconds: TimeInterval
+    public var failureMessages: [String: String]?
 
-    public init(command: CommandSpec, timeoutSeconds: TimeInterval = 10) {
+    public init(command: CommandSpec, timeoutSeconds: TimeInterval = 10, failureMessages: [String: String]? = nil) {
         self.command = command
         self.timeoutSeconds = timeoutSeconds
+        self.failureMessages = failureMessages
     }
 }
 
@@ -75,6 +77,12 @@ public enum RunState: String, Codable, Sendable {
     case outcomeUnknown
 }
 
+public enum RunTrigger: String, Codable, Sendable {
+    case scheduled
+    case manual
+    case scheduledAndManual
+}
+
 public struct RunRecord: Codable, Sendable, Identifiable, Equatable {
     public var id: UUID
     public var taskID: UUID
@@ -89,6 +97,9 @@ public struct RunRecord: Codable, Sendable, Identifiable, Equatable {
     public var blockerReason: String?
     public var standardOutput: String?
     public var standardError: String?
+    // Optional so databases written before manual runs remain readable.
+    public var trigger: RunTrigger?
+    public var lastCheckedAt: Date?
 
     public init(
         id: UUID = UUID(),
@@ -103,7 +114,8 @@ public struct RunRecord: Codable, Sendable, Identifiable, Equatable {
         exitCode: Int32? = nil,
         blockerReason: String? = nil,
         standardOutput: String? = nil,
-        standardError: String? = nil
+        standardError: String? = nil,
+        trigger: RunTrigger? = .scheduled
     ) {
         self.id = id
         self.taskID = taskID
@@ -118,6 +130,7 @@ public struct RunRecord: Codable, Sendable, Identifiable, Equatable {
         self.blockerReason = blockerReason
         self.standardOutput = standardOutput
         self.standardError = standardError
+        self.trigger = trigger
     }
 }
 

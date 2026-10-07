@@ -12,6 +12,7 @@ variables, not literal CLI arguments.
 "$cli" help
 "$cli" list
 "$cli" runs
+"$cli" activity
 
 "$cli" add-daily 07:00 America/New_York project-refresh --paused \
   --cwd "$project" \

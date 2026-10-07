@@ -1,24 +1,99 @@
 import Combine
+import AppKit
 import Foundation
 import RunEventuallyCore
 import SwiftUI
 
 @main
 struct RunEventuallyDesktopApp: App {
+    @NSApplicationDelegateAdaptor(DesktopLifecycle.self) private var lifecycle
     var body: some Scene {
-        WindowGroup("Run Eventually") {
-            DashboardView()
+        Window("Tasks — Run Eventually", id: "tasks") {
+            WindowNavigation(lifecycle: lifecycle) {
+                DashboardView()
+            }
         }
         .defaultSize(width: 1_050, height: 680)
+        .commands { NavigationCommands() }
+        Window("Activity — Run Eventually", id: "activity") {
+            WindowNavigation(lifecycle: lifecycle) {
+                ActivityWindow()
+            }
+        }
+        .defaultSize(width: 1_000, height: 700)
     }
 }
 
+@MainActor
+private final class DesktopLifecycle: NSObject, NSApplicationDelegate {
+    private var signals: TerminationSignals?
+    private var openTasks: (() -> Void)?
+    private var didOpenInitialTasks = false
+
+    func registerWindowOpener(_ opener: @escaping () -> Void) {
+        openTasks = opener
+        guard !didOpenInitialTasks else { return }
+        didOpenInitialTasks = true
+        // Restore may initially create only Activity. Always show Tasks at launch.
+        DispatchQueue.main.async { opener() }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openTasks?()
+        return true
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Capture at launch: a later build can replace files under a still-open UI.
+        _ = DesktopBuild.schedulerDigest
+        signals = TerminationSignals(queue: .main) {
+            Task { @MainActor in NSApplication.shared.terminate(nil) }
+        }
+    }
+}
+
+private struct WindowNavigation<Content: View>: View {
+    @Environment(\.openWindow) private var openWindow
+    let lifecycle: DesktopLifecycle
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .onAppear {
+                lifecycle.registerWindowOpener { openWindow(id: "tasks") }
+            }
+    }
+}
+
+private struct NavigationCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandMenu("View") {
+            Button("Task List") { openWindow(id: "tasks") }
+                .keyboardShortcut("1", modifiers: .command)
+            Button("Activity") { openWindow(id: "activity") }
+                .keyboardShortcut("2", modifiers: .command)
+        }
+    }
+}
+
+enum DesktopBuild {
+    static let schedulerDigest = try? SchedulerRuntime.executableDigest(
+        at: Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/run-eventually")
+    )
+}
+
 // Include the local zone so UTC input is not mistaken for a shifted schedule.
-private func timestamp(_ date: Date, seconds: Bool = false) -> String {
+func timestamp(_ date: Date, seconds: Bool = false) -> String {
     let formatter = DateFormatter()
     formatter.timeZone = .autoupdatingCurrent
     formatter.setLocalizedDateFormatFromTemplate(seconds ? "yMMMdjmmssz" : "yMMMdjmmz")
     return formatter.string(from: date)
+}
+
+private func runTimeLabel(_ run: RunRecord) -> String {
+    run.trigger == .manual ? "Requested" : "Due"
 }
 
 private struct TaskSummary: Identifiable, Sendable {
@@ -26,7 +101,18 @@ private struct TaskSummary: Identifiable, Sendable {
     let runs: [RunRecord]
 
     var id: UUID { task.id }
-    var pending: RunRecord? { runs.last { $0.state == .pending } }
+    var pendingRuns: [RunRecord] { runs.filter { $0.state == .pending } }
+    var pending: RunRecord? { pendingRuns.last }
+    var pendingText: String {
+        switch pendingRuns.count {
+        case 0: "No pending run"
+        case 1: "1 pending run"
+        default: "\(pendingRuns.count) pending runs"
+        }
+    }
+    var workingDirectoryText: String {
+        task.command.workingDirectory ?? "Not specified; inherits scheduler working directory"
+    }
     var active: RunRecord? { runs.last { $0.state == .starting || $0.state == .running } }
     var lastResult: RunRecord? {
         runs.last {
@@ -38,10 +124,34 @@ private struct TaskSummary: Identifiable, Sendable {
     var status: String {
         if task.isPaused { return "Paused" }
         if let active { return active.state == .starting ? "Starting" : "Running" }
-        if let pending { return pending.blockerReason == nil ? "Pending" : "Waiting" }
         if lastResult?.state == .outcomeUnknown { return "Needs review" }
-        if case .once = task.schedule, let lastResult { return lastResult.state.displayName }
+        if let pending { return pending.blockerReason == nil ? "Pending" : "Waiting" }
+        if let lastResult { return lastResult.state.displayName }
         return "Scheduled"
+    }
+
+    var statusColor: Color {
+        if task.isPaused { return .secondary }
+        if active != nil { return .accentColor }
+        if lastResult?.state == .outcomeUnknown { return .red }
+        if pending != nil { return .yellow }
+        switch lastResult?.state {
+        case .failed: return .red
+        case .succeeded: return .green
+        default: return .secondary
+        }
+    }
+
+    var statusIcon: String {
+        if task.isPaused { return "pause.circle.fill" }
+        if active != nil { return "play.circle.fill" }
+        if lastResult?.state == .outcomeUnknown { return "exclamationmark.triangle.fill" }
+        if pending != nil { return "clock.fill" }
+        switch lastResult?.state {
+        case .failed: return "xmark.circle.fill"
+        case .succeeded: return "checkmark.circle.fill"
+        default: return "calendar"
+        }
     }
 
     var scheduleText: String {
@@ -108,9 +218,19 @@ private final class DashboardModel: ObservableObject {
             isRefreshing = false
         }
     }
+
+    func requestRun(taskID: UUID) async throws -> RunRecord {
+        let path = databasePath
+        let run = try await Task.detached(priority: .userInitiated) {
+            try SQLiteStore(path: path).requestRun(taskID: taskID)
+        }.value
+        refresh()
+        return run
+    }
 }
 
 private struct DashboardView: View {
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var model = DashboardModel()
     @State private var selectedTaskID: UUID?
     private let refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
@@ -144,6 +264,24 @@ private struct DashboardView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                if model.errorMessage == nil {
+                    HStack(spacing: 16) {
+                        let pendingCount = model.summaries.reduce(0) { $0 + $1.pendingRuns.count }
+                        Label(
+                            pendingCount == 0 ? "No pending runs" : "\(pendingCount) pending \(pendingCount == 1 ? "run" : "runs")",
+                            systemImage: "clock"
+                        )
+                        let runningCount = model.summaries.filter { $0.active != nil }.count
+                        if runningCount > 0 {
+                            Label("\(runningCount) running", systemImage: "play.circle")
+                        }
+                        Spacer()
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    Divider()
+                }
                 HStack(spacing: 0) {
                     List(selection: $selectedTaskID) {
                         ForEach(model.summaries) { summary in
@@ -157,7 +295,7 @@ private struct DashboardView: View {
                     Divider()
 
                     if let selectedSummary {
-                        TaskDetail(summary: selectedSummary)
+                        TaskDetail(summary: selectedSummary, model: model)
                             .id(selectedSummary.id)
                     } else {
                         Text("Select a task to inspect its runs")
@@ -169,6 +307,14 @@ private struct DashboardView: View {
         }
         .frame(minWidth: 760, minHeight: 480)
         .toolbar {
+            ToolbarItem {
+                Button {
+                    openWindow(id: "activity")
+                } label: {
+                    Label("Activity", systemImage: "list.bullet.rectangle")
+                }
+                .help("Watch scheduler scans, readiness checks, and task execution")
+            }
             ToolbarItem {
                 Button {
                     model.refresh()
@@ -188,6 +334,24 @@ private struct DashboardView: View {
     }
 }
 
+private struct JobStatusBadge: View {
+    let summary: TaskSummary
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: summary.statusIcon)
+                .foregroundStyle(summary.statusColor)
+                .accessibilityHidden(true)
+            Text(summary.status)
+        }
+        .font(.caption)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(summary.statusColor.opacity(0.12), in: Capsule())
+        .accessibilityElement(children: .combine)
+    }
+}
+
 private struct TaskRow: View {
     let summary: TaskSummary
 
@@ -198,15 +362,21 @@ private struct TaskRow: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                Text(summary.status)
-                    .font(.caption)
-                    .foregroundStyle(summary.pending?.blockerReason == nil ? Color.secondary : Color.orange)
+                JobStatusBadge(summary: summary)
             }
             Text(summary.scheduleText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Label(summary.workingDirectoryText, systemImage: "folder")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(summary.workingDirectoryText)
+            Text(summary.pendingText)
+                .font(.caption)
             if let pending = summary.pending {
-                Text("Due \(timestamp(pending.firstScheduledAt))")
+                Text("\(runTimeLabel(pending)) \(timestamp(pending.firstScheduledAt))")
                     .font(.caption)
                 if let blocker = pending.blockerReason {
                     Text(blocker)
@@ -227,12 +397,18 @@ private struct TaskRow: View {
             }
         }
         .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(summary.statusColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
     }
 }
 
 private struct TaskDetail: View {
     let summary: TaskSummary
+    @ObservedObject var model: DashboardModel
     @State private var selectedRunID: UUID?
+    @State private var isRequestingRun = false
+    @State private var requestMessage: String?
+    @State private var requestFailed = false
 
     private var selectedRun: RunRecord? {
         summary.runs.first { $0.id == selectedRunID } ?? summary.runs.last
@@ -243,24 +419,73 @@ private struct TaskDetail: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text(summary.task.name)
                     .font(.largeTitle)
+                JobStatusBadge(summary: summary)
+                Button {
+                    isRequestingRun = true
+                    requestMessage = nil
+                    Task {
+                        defer { isRequestingRun = false }
+                        do {
+                            let run = try await model.requestRun(taskID: summary.id)
+                            selectedRunID = run.id
+                            requestFailed = false
+                            requestMessage = run.state == .pending
+                                ? "Run queued. Future scheduled runs are unchanged. The scheduler checks pending work about once a minute; prerequisites still apply."
+                                : "This task already has a run in progress."
+                        } catch {
+                            requestFailed = true
+                            requestMessage = error.localizedDescription
+                        }
+                    }
+                } label: {
+                    Label(isRequestingRun ? "Queuing…" : "Run now", systemImage: "play.fill")
+                }
+                .disabled(isRequestingRun || summary.task.isPaused || summary.active != nil || summary.lastResult?.state == .outcomeUnknown)
+                .help("Queue a run using the existing prerequisites. Reuse pending work; resume paused tasks first.")
+                if let requestMessage {
+                    Text(requestMessage)
+                        .font(.callout)
+                        .foregroundStyle(requestFailed ? Color.red : Color.secondary)
+                }
                 Text(summary.scheduleText)
                     .foregroundStyle(.secondary)
-                Text(summary.task.command.executable + " " + summary.task.command.arguments.joined(separator: " "))
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                if let pending = summary.pending {
-                    GroupBox("Pending work") {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("Due \(timestamp(pending.firstScheduledAt))")
-                            if pending.occurrenceCount > 1 {
-                                Text("Combines \(pending.occurrenceCount) missed occurrences")
-                            }
-                            if let blocker = pending.blockerReason {
-                                Text(blocker).foregroundStyle(.orange)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                GroupBox("Execution") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Command").font(.caption).foregroundStyle(.secondary)
+                        Text(summary.task.command.executable + " " + summary.task.command.arguments.joined(separator: " "))
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                        Text("Working directory").font(.caption).foregroundStyle(.secondary)
+                        Text(summary.workingDirectoryText)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                GroupBox("Pending work") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(summary.pendingText).fontWeight(.medium)
+                        ForEach(summary.pendingRuns) { pending in
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("\(runTimeLabel(pending)) \(timestamp(pending.firstScheduledAt))")
+                                if pending.occurrenceCount > 1 {
+                                    Text("Combines \(pending.occurrenceCount) missed occurrences")
+                                }
+                                if let blocker = pending.blockerReason {
+                                    Label(blocker, systemImage: "exclamationmark.triangle")
+                                        .foregroundStyle(.orange)
+                                        .textSelection(.enabled)
+                                }
+                                if let checkedAt = pending.lastCheckedAt {
+                                    Text("Last checked \(timestamp(checkedAt, seconds: true)) · Rechecks about once a minute")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 Divider()
@@ -284,7 +509,17 @@ private struct TaskDetail: View {
                     Divider()
                     Text("Selected run")
                         .font(.title2)
-                    Text("\(selectedRun.state.displayName) · Due \(timestamp(selectedRun.firstScheduledAt, seconds: true))")
+                    Text("\(selectedRun.state.displayName) · \(runTimeLabel(selectedRun)) \(timestamp(selectedRun.firstScheduledAt, seconds: true))")
+                    if let blocker = selectedRun.blockerReason {
+                        Label(blocker, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                            .textSelection(.enabled)
+                    }
+                    if selectedRun.trigger == .manual {
+                        Text("Requested with Run now")
+                    } else if selectedRun.trigger == .scheduledAndManual {
+                        Text("Combines a manual request with scheduled work")
+                    }
                     if let startedAt = selectedRun.startedAt {
                         Text("Started \(timestamp(startedAt, seconds: true))")
                     }
@@ -316,7 +551,7 @@ private struct RunRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(run.state.displayName)
                     .fontWeight(.medium)
-                Text("Due \(timestamp(run.firstScheduledAt))")
+                Text("\(runTimeLabel(run)) \(timestamp(run.firstScheduledAt))")
                     .foregroundStyle(.secondary)
                 if let finishedAt = run.finishedAt {
                     Text("Finished \(timestamp(finishedAt))")
