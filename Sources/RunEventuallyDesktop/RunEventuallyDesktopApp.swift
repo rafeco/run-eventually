@@ -125,7 +125,7 @@ private struct TaskSummary: Identifiable, Sendable {
         if task.isPaused { return "Paused" }
         if let active { return active.state == .starting ? "Starting" : "Running" }
         if lastResult?.state == .outcomeUnknown { return "Needs review" }
-        if let pending { return pending.blockerReason == nil ? "Pending" : "Waiting" }
+        if let pending { return pending.readinessStatus?.displayName ?? (pending.blockerReason == nil ? "Pending" : "Waiting") }
         if let lastResult { return lastResult.state.displayName }
         return "Scheduled"
     }
@@ -134,7 +134,7 @@ private struct TaskSummary: Identifiable, Sendable {
         if task.isPaused { return .secondary }
         if active != nil { return .accentColor }
         if lastResult?.state == .outcomeUnknown { return .red }
-        if pending != nil { return .yellow }
+        if let pending { return pending.readinessStatus == .actionRequired || pending.readinessStatus == .checkError ? .orange : .yellow }
         switch lastResult?.state {
         case .failed: return .red
         case .succeeded: return .green
@@ -146,7 +146,10 @@ private struct TaskSummary: Identifiable, Sendable {
         if task.isPaused { return "pause.circle.fill" }
         if active != nil { return "play.circle.fill" }
         if lastResult?.state == .outcomeUnknown { return "exclamationmark.triangle.fill" }
-        if pending != nil { return "clock.fill" }
+        if let pending {
+            return pending.readinessStatus == .actionRequired || pending.readinessStatus == .checkError
+                ? "exclamationmark.triangle.fill" : "clock.fill"
+        }
         switch lastResult?.state {
         case .failed: return "xmark.circle.fill"
         case .succeeded: return "checkmark.circle.fill"
@@ -227,13 +230,21 @@ private final class DashboardModel: ObservableObject {
         refresh()
         return run
     }
+
+    func recheck(taskID: UUID) async throws {
+        let path = databasePath
+        try await Task.detached(priority: .userInitiated) {
+            try SQLiteStore(path: path).requestRecheck(taskID: taskID)
+        }.value
+        refresh()
+    }
 }
 
 private struct DashboardView: View {
     @Environment(\.openWindow) private var openWindow
     @StateObject private var model = DashboardModel()
     @State private var selectedTaskID: UUID?
-    private let refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+    private let refreshTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var selectedSummary: TaskSummary? {
         model.summaries.first { $0.id == selectedTaskID }
@@ -409,6 +420,7 @@ private struct TaskDetail: View {
     @State private var isRequestingRun = false
     @State private var requestMessage: String?
     @State private var requestFailed = false
+    @State private var isRechecking = false
 
     private var selectedRun: RunRecord? {
         summary.runs.first { $0.id == selectedRunID } ?? summary.runs.last
@@ -462,6 +474,37 @@ private struct TaskDetail: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                GroupBox("Readiness checks") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(summary.task.readinessChecks ?? []) { check in
+                            Text(check.provider.description)
+                            Text("Timeout: \(Int(check.timeoutSeconds)) seconds")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if summary.task.check != nil { Text("Custom command check (also required)") }
+                        if (summary.task.readinessChecks?.isEmpty ?? true) && summary.task.check == nil {
+                            Text("No readiness checks configured").foregroundStyle(.secondary)
+                        }
+                        if summary.pending?.blockerReason != nil {
+                            Button(isRechecking ? "Requesting…" : "Recheck") {
+                                isRechecking = true
+                                Task {
+                                    defer { isRechecking = false }
+                                    do {
+                                        try await model.recheck(taskID: summary.id)
+                                        requestFailed = false
+                                        requestMessage = "Readiness will be checked on the next scheduler scan."
+                                    } catch {
+                                        requestFailed = true
+                                        requestMessage = error.localizedDescription
+                                    }
+                                }
+                            }
+                            .disabled(isRechecking || summary.task.isPaused)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 GroupBox("Pending work") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(summary.pendingText).fontWeight(.medium)
@@ -472,14 +515,24 @@ private struct TaskDetail: View {
                                     Text("Combines \(pending.occurrenceCount) missed occurrences")
                                 }
                                 if let blocker = pending.blockerReason {
+                                    if let status = pending.readinessStatus {
+                                        Text(status.displayName).fontWeight(.medium)
+                                    }
                                     Label(blocker, systemImage: "exclamationmark.triangle")
                                         .foregroundStyle(.orange)
                                         .textSelection(.enabled)
                                 }
                                 if let checkedAt = pending.lastCheckedAt {
-                                    Text("Last checked \(timestamp(checkedAt, seconds: true)) · Rechecks about once a minute")
+                                    Text("Last checked \(timestamp(checkedAt, seconds: true))")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                    if let next = pending.nextCheckAt {
+                                        Text("Next check \(timestamp(next, seconds: true))")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    } else {
+                                        Text("Rechecks on the next scheduler scan")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -532,8 +585,10 @@ private struct TaskDetail: View {
                     if let exitCode = selectedRun.exitCode {
                         Text("Exit code \(exitCode)")
                     }
-                    LogView(title: "Standard output", content: selectedRun.standardOutput)
-                    LogView(title: "Standard error", content: selectedRun.standardError)
+                    LogView(title: "Standard output", content: selectedRun.standardOutput,
+                        path: selectedRun.standardOutputPath, running: selectedRun.state == .running)
+                    LogView(title: "Standard error", content: selectedRun.standardError,
+                        path: selectedRun.standardErrorPath, running: selectedRun.state == .running)
                 }
             }
             .padding(20)
@@ -576,16 +631,21 @@ private struct RunRow: View {
 private struct LogView: View {
     let title: String
     let content: String?
-    private let displayLimit = 16_000
+    let path: String?
+    let running: Bool
 
     private var displayText: String {
         guard let content, !content.isEmpty else { return "No output captured" }
-        let prefix = String(content.prefix(displayLimit))
-        return content.count > displayLimit ? prefix + "\n… Output truncated for display" : prefix
+        return content
     }
 
     var body: some View {
         GroupBox(title) {
+            if let path {
+                LiveLogView(path: path, finished: !running)
+                    .id(path)
+                    .frame(height: 220)
+            } else {
             ScrollView([.horizontal, .vertical]) {
                 Text(verbatim: displayText)
                     .font(.system(.caption, design: .monospaced))
@@ -593,6 +653,7 @@ private struct LogView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(height: 140)
+            }
         }
     }
 }

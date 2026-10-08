@@ -23,11 +23,18 @@ assume all of it is implemented.
 
 The intended architecture has one per-user LaunchAgent scheduler, with the UI and
 a local MCP adapter communicating through a shared API over XPC. Startup
-registration through SMAppService, XPC, MCP, UI editing, reusable VPN/Google checks, and browser-assisted
+registration through SMAppService, XPC, MCP, UI editing, and browser-assisted
 authentication are not implemented yet. The prototype CLI writes task definitions
 directly to SQLite; the desktop reads it and transactionally queues manual runs.
 Only the scheduler launches commands. Keep scheduling authority centralized
 when introducing the service.
+
+Standard network/VPN, SSH, and BigQuery providers are configured with `add-check`.
+All standard checks and the legacy custom check must pass before launch. Provider
+results distinguish Waiting, Action required, and Check error; raw probe output
+must never enter Activity or run logs. Standard checks inherit the task context,
+back off on failure, and can be rechecked without queuing a new run. Readiness
+concerns environmental availability; assume the task already works manually.
 
 `examples/pe-dashboard` provides a composite readiness check and a daily pipeline
 configuration. `scripts/install-dev-agent.sh` is a temporary per-user LaunchAgent
@@ -57,7 +64,7 @@ workflow graph in this app. General interactive terminal sessions are deferred.
 - Display due, started, and finished timestamps with clear labels and time zones.
 
 Current limitations: one execution worker, minute polling, one custom check per
-task, bounded output stored in SQLite, and timeout termination of the parent
+task, complete stdout/stderr files with bounded legacy previews in SQLite, and timeout termination of the parent
 process only. Process-group termination and reliable recovery of spawned children
 still need work. Browser sign-in must eventually be user initiated, with credential
 readiness rechecked afterward; do not automatically launch browsers from polling.

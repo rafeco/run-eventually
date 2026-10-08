@@ -18,6 +18,13 @@ Usage:
   run-eventually [--database PATH] add-once ISO8601 NAME [--cwd PATH] [--env KEY=VALUE] -- EXECUTABLE [ARG ...]
   run-eventually [--database PATH] add-daily HH:MM TIME_ZONE NAME [--paused] [--cwd PATH] [--env KEY=VALUE] -- EXECUTABLE [ARG ...]
   run-eventually [--database PATH] set-check TASK_ID [--timeout-seconds N] [--failure-message CODE=MESSAGE] [--cwd PATH] [--env KEY=VALUE] -- EXECUTABLE [ARG ...]
+  run-eventually [--database PATH] add-check TASK_ID network --host HOST --port PORT [--timeout-seconds N]
+  run-eventually [--database PATH] add-check TASK_ID ssh --host HOST_ALIAS [--timeout-seconds N]
+  run-eventually [--database PATH] add-check TASK_ID bq --project PROJECT [--dataset DATASET] [--timeout-seconds N]
+  run-eventually [--database PATH] checks TASK_ID
+  run-eventually [--database PATH] remove-check TASK_ID CHECK_ID|custom
+  run-eventually [--database PATH] check-now TASK_ID
+  run-eventually [--database PATH] recheck TASK_ID
   run-eventually [--database PATH] pause TASK_ID
   run-eventually [--database PATH] resume TASK_ID
   run-eventually [--database PATH] run-now TASK_ID
@@ -99,6 +106,102 @@ private func main() throws {
     arguments.removeFirst()
 
     switch command {
+    case "add-check":
+        guard arguments.count >= 2 else { throw CLIError.usage(help) }
+        let store = try SQLiteStore(path: databasePath)
+        let id = try taskID(arguments[0])
+        guard var task = try store.task(id: id) else { throw CLIError.usage("Task not found.") }
+        let providerName = arguments[1]
+        let allowed: Set<String>
+        switch providerName {
+        case "network", "vpn": allowed = ["--host", "--port", "--timeout-seconds"]
+        case "ssh": allowed = ["--host", "--timeout-seconds"]
+        case "bq": allowed = ["--project", "--dataset", "--timeout-seconds"]
+        default: throw CLIError.usage("Unknown readiness provider. Use network, vpn, ssh, or bq.")
+        }
+        var options: [String: String] = [:]
+        var index = 2
+        while index < arguments.count {
+            guard index + 1 < arguments.count, allowed.contains(arguments[index]), options[arguments[index]] == nil else {
+                throw CLIError.usage("Unknown, repeated, or incomplete check option: \(arguments[index])")
+            }
+            options[arguments[index]] = arguments[index + 1]
+            index += 2
+        }
+        let provider: ReadinessProvider
+        switch providerName {
+        case "network", "vpn":
+            guard let host = options["--host"], let port = options["--port"].flatMap(UInt16.init) else {
+                throw CLIError.usage("Network check requires --host and --port.")
+            }
+            provider = .network(host: host, port: port)
+        case "ssh":
+            guard let host = options["--host"] else { throw CLIError.usage("SSH check requires --host.") }
+            provider = .ssh(host: host)
+        default:
+            guard let project = options["--project"] else { throw CLIError.usage("BigQuery check requires --project.") }
+            provider = .bigQuery(project: project, dataset: options["--dataset"])
+        }
+        guard let timeout = Double(options["--timeout-seconds"] ?? (providerName == "bq" ? "30" : "10")) else {
+            throw CLIError.usage("Invalid check timeout.")
+        }
+        let check = ReadinessCheck(provider: provider, timeoutSeconds: timeout)
+        try check.validate()
+        if let existing = task.readinessChecks?.first(where: { $0.provider == provider && $0.timeoutSeconds == timeout }) {
+            print("Existing check \(existing.id.uuidString): \(provider.description)")
+        } else {
+            task.readinessChecks = (task.readinessChecks ?? []) + [check]
+            try store.updateTask(task)
+            print("Added check \(check.id.uuidString): \(provider.description)")
+        }
+
+    case "checks", "check-now", "recheck", "remove-check":
+        guard arguments.count == (command == "remove-check" ? 2 : 1) else { throw CLIError.usage(help) }
+        let store = try SQLiteStore(path: databasePath)
+        let id = try taskID(arguments[0])
+        guard var task = try store.task(id: id) else { throw CLIError.usage("Task not found.") }
+        switch command {
+        case "remove-check":
+            if arguments[1] == "custom" {
+                guard task.check != nil else { throw CLIError.usage("No custom check is attached.") }
+                task.check = nil
+            } else {
+                let checkID = try taskID(arguments[1])
+                guard task.readinessChecks?.contains(where: { $0.id == checkID }) == true else {
+                    throw CLIError.usage("Check not found on this task.")
+                }
+                task.readinessChecks?.removeAll { $0.id == checkID }
+            }
+            try store.updateTask(task)
+            print("Removed check from \(task.name).")
+        case "recheck":
+            try store.requestRecheck(taskID: id)
+            print("Recheck requested for the next scheduler scan. No new run was queued.")
+        case "check-now":
+            var ready = true
+            if (task.readinessChecks?.isEmpty ?? true) && task.check == nil { print("No readiness checks configured.") }
+            for check in task.readinessChecks ?? [] {
+                let result = ReadinessRunner.run(check, context: task.command)
+                print("\(check.id.uuidString) \(result.status.displayName): \(result.message)")
+                ready = ready && result.status == .ready
+            }
+            if let check = task.check {
+                do {
+                    let result = try CommandRunner.run(check.command, timeoutSeconds: check.timeoutSeconds, outputLimitBytes: 0)
+                    let passed = result.exitCode == 0 && !result.timedOut
+                    print(passed ? "Custom check: Ready" : "Custom check: Not ready")
+                    ready = ready && passed
+                } catch { print("Custom check: Check error"); ready = false }
+            }
+            if !ready { exit(2) }
+        default:
+            for check in task.readinessChecks ?? [] {
+                print("\(check.id.uuidString) \(check.provider.description) (timeout \(check.timeoutSeconds)s)")
+            }
+            if task.check != nil { print("custom: Custom command check (also required)") }
+            if (task.readinessChecks?.isEmpty ?? true) && task.check == nil { print("No readiness checks.") }
+        }
+
     case "add-once":
         guard arguments.count >= 4 else { throw CLIError.usage(help) }
         let scheduled = try parseDate(arguments[0])
@@ -207,7 +310,8 @@ private func main() throws {
         for run in try store.listRuns(taskID: nil) {
             let due = ISO8601DateFormatter().string(from: run.firstScheduledAt)
             let reason = run.blockerReason.map { "  \($0)" } ?? ""
-            print("\(run.id.uuidString)  \(run.state.rawValue)  due \(due)  count \(run.occurrenceCount)\(reason)")
+            let readiness = run.readinessStatus.map { "  \($0.displayName)" } ?? ""
+            print("\(run.id.uuidString)  \(run.state.rawValue)  due \(due)  count \(run.occurrenceCount)\(readiness)\(reason)")
         }
 
     case "activity":

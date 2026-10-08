@@ -128,6 +128,15 @@ public final class SQLiteStore: @unchecked Sendable {
             try transaction {
                 let previous = try loadTask(id: task.id)
                 try saveTask(task)
+                if previous?.check != task.check || previous?.readinessChecks != task.readinessChecks {
+                    if var pending = try loadPendingRun(taskID: task.id) {
+                        pending.nextCheckAt = nil
+                        pending.readinessStatus = nil
+                        pending.blockerReason = nil
+                        pending.consecutiveCheckFailures = nil
+                        try saveRun(pending)
+                    }
+                }
                 let message = previous?.isPaused != task.isPaused
                     ? (task.isPaused ? "Task paused. Running commands are unaffected." : "Task resumed.")
                     : (previous?.check != task.check ? "Readiness check updated." : "Task definition updated.")
@@ -218,13 +227,37 @@ public final class SQLiteStore: @unchecked Sendable {
 
     /// A check may finish after another client has coalesced more due work.
     /// Update its blocker without overwriting the latest occurrence data.
-    public func recordCheckBlocker(runID: UUID, reason: String) throws {
+    public func recordCheckBlocker(runID: UUID, reason: String,
+        status: ReadinessStatus? = nil, checkedAt: Date = Date(), nextCheckAt: Date? = nil,
+        expectedTask: TaskDefinition? = nil) throws {
         try lock.withLock {
             try transaction {
                 guard var run = try loadRun(id: runID), run.state == .pending else { return }
+                if let expectedTask {
+                    guard let current = try loadTask(id: run.taskID),
+                        current.matchesExecutionConfiguration(of: expectedTask) else { return }
+                }
                 run.blockerReason = reason
-                run.lastCheckedAt = Date()
+                run.lastCheckedAt = checkedAt
+                run.readinessStatus = status
+                run.nextCheckAt = nextCheckAt
+                run.consecutiveCheckFailures = (run.consecutiveCheckFailures ?? 0) + 1
                 try saveRun(run)
+            }
+        }
+    }
+
+    public func requestRecheck(taskID: UUID) throws {
+        try lock.withLock {
+            try transaction {
+                guard try loadTask(id: taskID) != nil else { throw SQLiteStoreError.missingTask(taskID) }
+                if var run = try loadPendingRun(taskID: taskID) {
+                    run.nextCheckAt = nil
+                    run.consecutiveCheckFailures = nil
+                    try saveRun(run)
+                }
+                try appendActivityUnlocked(ActivityEvent(kind: .taskUpdated,
+                    message: "Readiness recheck requested; pending work will be checked on the next scan.", taskID: taskID))
             }
         }
     }
@@ -328,17 +361,21 @@ public final class SQLiteStore: @unchecked Sendable {
 
     /// Only one attempt for a task may be in progress or awaiting an outcome.
     /// A claim never consumes a pending run while the task is paused.
-    public func claimPendingRun(id: UUID, at: Date) throws -> RunRecord? {
+    public func claimPendingRun(id: UUID, at: Date, expectedTask: TaskDefinition? = nil) throws -> RunRecord? {
         try lock.withLock {
             try transaction {
                 guard var run = try loadRun(id: id), run.state == .pending,
                       let task = try loadTask(id: run.taskID), !task.isPaused,
                       try !hasUnresolvedRun(taskID: run.taskID)
                 else { return nil }
+                if let expectedTask, !task.matchesExecutionConfiguration(of: expectedTask) { return nil }
 
                 run.state = .starting
                 run.startedAt = at
                 run.blockerReason = nil
+                run.readinessStatus = nil
+                run.nextCheckAt = nil
+                run.consecutiveCheckFailures = nil
                 try saveRun(run)
                 return run
             }

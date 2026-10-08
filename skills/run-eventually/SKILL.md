@@ -51,12 +51,20 @@ on the same database. Never silently replace test state with live state.
   scheduling for a requested weekly or interval schedule.
 - Name the task recognizably with its project and operation. Inspect existing
   definitions before creation; compare directory, command, arguments, schedule,
-  and check as well as name. Reuse an equivalent task. Investigate same-name tasks
+  custom and standard checks as well as name. Reuse an equivalent task. Investigate same-name tasks
   with different settings rather than blindly adding another.
-- Attach short, noninteractive readiness checks for required credentials or
-  network access. Multiple conditions can live in one project-owned composite
-  check. Check the credential source the command actually uses: Google CLI
-  credentials and ADC differ. Checks must not launch login or print tokens.
+- Assume the maintained task can already run manually. Check changing execution
+  conditions, not application setup: do not add recurring checks for API keys in
+  `.env`, dependencies, schema, or business inputs by default. Report a known
+  setup problem separately; honor explicitly requested project conditions.
+- Prefer standard network/VPN, SSH, and BigQuery readiness providers when the
+  selected interface exposes them. Read [references/readiness.md](references/readiness.md)
+  for provider configuration, blocker classification, and supported commands.
+  Use a custom check only for a condition the providers do not cover, or when
+  an older executable lacks the provider. Check
+  the credential source the command actually uses: Google CLI credentials and
+  ADC differ. Checks must be short and noninteractive, never launch login or
+  print tokens.
 
 A request to schedule work authorizes ordinary task creation; do not add a routine
 confirmation step. Ask only for necessary missing information. Do not execute the

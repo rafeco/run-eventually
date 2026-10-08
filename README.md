@@ -80,8 +80,42 @@ runs ETL locally, uploads a validated SQLite snapshot to the VM, and restarts
 the dashboard in tmux without Google authorization on the VM.
 
 This is a development preview. Bundled startup registration, task editing in the app,
-reusable VPN and Google Cloud checks, browser-assisted sign-in, MCP, and signed
+browser-assisted sign-in, MCP, and signed
 distribution are still to be built.
+
+## Standard readiness checks
+
+Attach network/VPN, SSH, and BigQuery checks with `add-check`; all attached checks
+must pass before launch. They use the task's working directory and environment.
+For example, using the installed CLI and the ID returned when creating a task:
+
+```sh
+"$cli" add-check "$task_id" network --host internal.example --port 22
+"$cli" add-check "$task_id" ssh --host work-vm
+"$cli" add-check "$task_id" bq --project work-project --dataset metrics
+"$cli" checks "$task_id"
+"$cli" check-now "$task_id"
+```
+
+Select only the conditions the task needs. `vpn` is an alias for an endpoint
+reachability check. SSH runs `true` with batch authentication and host verification;
+it does not accept new host keys. BigQuery uses `bq` to list at most one dataset
+or read a specified dataset's metadata, without running queries. Metadata access
+does not prove permission to run every query. Configure the task's existing
+credential context rather than copying secrets into its definition.
+
+The app shows **Waiting**, **Action required**, or **Check error** and the next
+check time. Transient and inconclusive failures back off from one minute to a
+maximum of fifteen; action-required conditions recheck every five minutes.
+**Recheck**, or `recheck TASK_ID`, clears that delay for the next scheduler scan.
+`check-now` probes without launching a task or modifying its schedule (exit 2 if
+not ready). `remove-check TASK_ID CHECK_ID` removes one provider; use `custom` as
+the ID to remove the legacy command check. Existing custom checks still run and
+must also pass. Missing tools and known credential or access problems require
+action; uncertain failures are not diagnosed as expired credentials.
+
+Assume the task already runs manually. Readiness checks concern changing network
+and credential availability, not application setup or API keys in `.env`.
 
 ## Watching activity
 
@@ -99,8 +133,18 @@ pause updates to inspect an event without stopping the scheduler.
 Activity persists across app restarts in the scheduler database. The window shows
 the latest 500 events, and the database retains a rolling history of 5,000.
 Operational events contain summaries rather than command output, arguments, or
-environment values; completed task output remains in the selected run's logs.
+environment values; task output remains in the selected run's logs.
 Use `run-eventually activity` to print the latest 200 events from the CLI.
+
+Select a running task's run to follow standard output and standard error live.
+The log panes update twice a second, follow new output while you are at the
+bottom, and let you scroll back without being pulled away. New runs retain full
+output in separate files beside the database, under `state.sqlite.logs/`; neither
+file capture nor display truncates it. SQLite retains small previews for older
+clients. Existing runs show all output previously captured, but output discarded
+by older versions cannot be recovered. Log files currently require manual
+retention. Python tasks default to unbuffered output unless the task explicitly
+sets `PYTHONUNBUFFERED`; other programs may need their own flushing options.
 
 Existing tasks are preserved when the activity table is added. An already running
 older scheduler must be restarted with the new executable before it emits activity;

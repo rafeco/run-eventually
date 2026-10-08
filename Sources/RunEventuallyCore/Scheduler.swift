@@ -21,9 +21,13 @@ public final class Scheduler {
     public let store: SQLiteStore
     private let lockDescriptor: Int32
     private let sessionID: UUID
+    private let logDirectory: URL
+    private let readinessRunner: (ReadinessCheck, CommandSpec) -> ReadinessResult
     public let shutdown = GracefulShutdown()
 
-    public init(databasePath: String) throws {
+    public init(databasePath: String,
+        readinessRunner: @escaping (ReadinessCheck, CommandSpec) -> ReadinessResult = { ReadinessRunner.run($0, context: $1) }
+    ) throws {
         let store = try SQLiteStore(path: databasePath)
         let lockPath = databasePath + ".scheduler.lock"
         let descriptor = lockPath.withCString { open($0, O_CREAT | O_RDWR, 0o600) }
@@ -45,6 +49,8 @@ public final class Scheduler {
         self.store = store
         self.lockDescriptor = descriptor
         self.sessionID = session
+        self.logDirectory = URL(fileURLWithPath: databasePath + ".logs", isDirectory: true)
+        self.readinessRunner = readinessRunner
     }
 
     deinit {
@@ -139,7 +145,7 @@ public final class Scheduler {
             }
         }
 
-        for task in tasks where !task.isPaused {
+        taskLoop: for task in tasks where !task.isPaused {
             if shutdown.isRequested { return nil }
             let runs = try store.listRuns(taskID: task.id)
             let pending = runs
@@ -155,6 +161,26 @@ public final class Scheduler {
                 continue
             }
 
+            if let next = run.nextCheckAt, next > now { continue }
+            for check in task.readinessChecks ?? [] {
+                guard try shutdown.admit({
+                    try record(.checkStarted, "Checking \(check.provider.description).", taskID: task.id, runID: run.id)
+                    return true
+                }) == true else { return nil }
+                let result = readinessRunner(check, task.command)
+                if result.status != .ready {
+                    let failures = min(run.consecutiveCheckFailures ?? 0, 4)
+                    let delay: TimeInterval = result.status == .actionRequired ? 300 : min(900, 60 * pow(2, Double(failures)))
+                    try store.recordCheckBlocker(runID: run.id, reason: result.message,
+                        status: result.status, checkedAt: now, nextCheckAt: now.addingTimeInterval(delay), expectedTask: task)
+                    try record(result.status == .checkError ? .checkFailed : .checkBlocked,
+                        "\(result.status.displayName): \(result.message)",
+                        level: result.status == .checkError ? .error : .warning, taskID: task.id, runID: run.id)
+                    continue taskLoop
+                }
+                try record(.checkPassed, result.message, taskID: task.id, runID: run.id)
+            }
+
             if let check = task.check {
                 guard try shutdown.admit({
                     try record(.checkStarted, "Running the readiness check.", taskID: task.id, runID: run.id)
@@ -168,7 +194,7 @@ public final class Scheduler {
                         outputLimitBytes: 0
                     )
                 } catch {
-                    try store.recordCheckBlocker(runID: run.id, reason: "Prerequisite check could not start: \(error.localizedDescription)")
+                    try store.recordCheckBlocker(runID: run.id, reason: "Prerequisite check could not start: \(error.localizedDescription)", status: .checkError, expectedTask: task)
                     try record(.checkFailed, "Readiness check could not start: \(error.localizedDescription)",
                         level: .error, taskID: task.id, runID: run.id)
                     continue
@@ -177,19 +203,20 @@ public final class Scheduler {
                     let reason = result.timedOut
                         ? "Prerequisite check timed out."
                         : (check.failureMessages?[String(result.exitCode)] ?? "Prerequisite check returned exit code \(result.exitCode).")
-                    try store.recordCheckBlocker(runID: run.id, reason: reason)
+                    try store.recordCheckBlocker(runID: run.id, reason: reason,
+                        status: result.exitCode == 1 && !result.timedOut ? .waiting : .checkError, expectedTask: task)
                     try record(result.timedOut || result.exitCode != 1 ? .checkFailed : .checkBlocked,
                         reason, level: result.timedOut || result.exitCode != 1 ? .error : .warning,
                         taskID: task.id, runID: run.id)
                     continue
                 }
                 try record(.checkPassed, "Readiness check passed.", taskID: task.id, runID: run.id)
-            } else {
+            } else if task.readinessChecks?.isEmpty ?? true {
                 try record(.eligibilityChecked, "No readiness check is configured; work is eligible for launch.", taskID: task.id, runID: run.id)
             }
 
             if shutdown.isRequested { return nil }
-            guard var claimed = try shutdown.admit({ try store.claimPendingRun(id: run.id, at: Date()) }) ?? nil else {
+            guard var claimed = try shutdown.admit({ try store.claimPendingRun(id: run.id, at: Date(), expectedTask: task) }) ?? nil else {
                 try record(.runHeld, "Launch skipped; this run is no longer eligible to claim.", taskID: task.id, runID: run.id)
                 continue
             }
@@ -200,7 +227,15 @@ public final class Scheduler {
             try record(.runStarted, "Running the task command.", taskID: task.id, runID: run.id)
 
             do {
-                let result = try CommandRunner.run(task.command, timeoutSeconds: 3_600)
+                let logs = try CommandLogFiles(directory: logDirectory, runID: claimed.id)
+                claimed.standardOutputPath = logs.output.path
+                claimed.standardErrorPath = logs.error.path
+                try store.upsertRun(claimed)
+                var command = task.command
+                if command.environment["PYTHONUNBUFFERED"] == nil {
+                    command.environment["PYTHONUNBUFFERED"] = "1"
+                }
+                let result = try CommandRunner.run(command, timeoutSeconds: 3_600, logFiles: logs)
                 claimed.exitCode = result.exitCode
                 claimed.standardOutput = result.standardOutput
                 claimed.standardError = result.standardError

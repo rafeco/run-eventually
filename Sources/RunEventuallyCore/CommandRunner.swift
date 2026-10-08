@@ -25,11 +25,14 @@ public enum CommandRunnerError: Error, Equatable {
 public enum CommandRunner {
     /// Runs a command without a shell. Output is limited to the first `outputLimitBytes`
     /// bytes of each stream. Excess bytes are drained and discarded so a verbose
-    /// process cannot block on a full pipe or consume unbounded storage.
+    /// process cannot block on a full pipe or consume unbounded memory. With
+    /// logFiles, both streams go directly to complete, live-readable files;
+    /// outputLimitBytes limits only the returned compatibility previews.
     public static func run(
         _ command: CommandSpec,
         timeoutSeconds: TimeInterval,
-        outputLimitBytes: Int = 65_536
+        outputLimitBytes: Int = 65_536,
+        logFiles: CommandLogFiles? = nil
     ) throws -> CommandOutcome {
         guard timeoutSeconds.isFinite, timeoutSeconds > 0 else {
             throw CommandRunnerError.invalidTimeout
@@ -58,8 +61,13 @@ public enum CommandRunner {
         process.arguments = command.arguments
         process.environment = environment
         process.standardInput = FileHandle.nullDevice
-        process.standardOutput = standardOutput.pipe
-        process.standardError = standardError.pipe
+        let writers = try logFiles?.openWriters()
+        defer {
+            try? writers?.output.close()
+            try? writers?.error.close()
+        }
+        process.standardOutput = writers?.output ?? standardOutput.pipe.fileHandleForWriting
+        process.standardError = writers?.error ?? standardError.pipe.fileHandleForWriting
         if let workingDirectory = command.workingDirectory {
             process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory, isDirectory: true)
         }
@@ -67,8 +75,10 @@ public enum CommandRunner {
         let finished = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in finished.signal() }
         try process.run()
-        standardOutput.startDraining()
-        standardError.startDraining()
+        if writers == nil {
+            standardOutput.startDraining()
+            standardError.startDraining()
+        }
         standardOutput.closeWriter()
         standardError.closeWriter()
 
@@ -83,8 +93,10 @@ public enum CommandRunner {
             }
         }
         process.waitUntilExit()
-        let output = standardOutput.finish()
-        let errorOutput = standardError.finish()
+        let output = try logFiles.map { try $0.preview(at: $0.output, limit: outputLimitBytes) }
+            ?? standardOutput.finish()
+        let errorOutput = try logFiles.map { try $0.preview(at: $0.error, limit: outputLimitBytes) }
+            ?? standardError.finish()
 
         return CommandOutcome(
             exitCode: process.terminationStatus,

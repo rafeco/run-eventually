@@ -42,9 +42,17 @@ public struct TaskDefinition: Codable, Sendable, Identifiable, Equatable {
     public var command: CommandSpec
     public var schedule: TaskSchedule
     public var check: CheckSpec?
+    public var readinessChecks: [ReadinessCheck]?
     public var isPaused: Bool
     public var scheduleCursor: Date
     public var createdAt: Date
+
+    /// Schedule reconciliation changes the cursor without changing checked inputs.
+    func matchesExecutionConfiguration(of other: TaskDefinition) -> Bool {
+        id == other.id && command == other.command && schedule == other.schedule
+            && check == other.check && readinessChecks == other.readinessChecks
+            && isPaused == other.isPaused
+    }
 
     public init(
         id: UUID = UUID(),
@@ -97,9 +105,14 @@ public struct RunRecord: Codable, Sendable, Identifiable, Equatable {
     public var blockerReason: String?
     public var standardOutput: String?
     public var standardError: String?
+    public var standardOutputPath: String?
+    public var standardErrorPath: String?
     // Optional so databases written before manual runs remain readable.
     public var trigger: RunTrigger?
     public var lastCheckedAt: Date?
+    public var readinessStatus: ReadinessStatus?
+    public var nextCheckAt: Date?
+    public var consecutiveCheckFailures: Int?
 
     public init(
         id: UUID = UUID(),

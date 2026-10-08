@@ -74,7 +74,7 @@ A task is the persistent definition. A run represents one request to execute it,
 
 Proposed edit behavior: runs with no launch claim adopt definition edits while preserving their represented due times and an audit of the change. At the first durable launch claim, the run's command and execution policy become immutable, including for retries. Newly due work accumulates in a separate pending run using the current task revision. Prerequisite edits invalidate cached checks and cause pending work to re-evaluate the new configuration. History records which prerequisite configuration was checked before each launch.
 
-SQLite stores definitions, schedule progress, runs, attempts, and resolution state in the user's Application Support directory. Ordinary command output goes to bounded log files referenced by the database. Credentials and tokens are not part of task records; use references to existing credential configurations or Keychain-backed secrets where needed.
+SQLite stores definitions, schedule progress, runs, attempts, and resolution state in the user's Application Support directory. Ordinary command output goes to complete log files referenced by the database, readable while the command runs. Display does not truncate output; retention should remove whole old logs rather than silently discard part of a run. Credentials and tokens are not part of task records; use references to existing credential configurations or Keychain-backed secrets where needed.
 
 ## Scheduling and catch-up
 
@@ -129,18 +129,55 @@ Persisted occurrence identity and cursor updates prevent a backward clock adjust
 
 ## Prerequisites
 
+The current preview implements per-task network/VPN TCP, SSH, and BigQuery
+metadata checks through `add-check`, in addition to the legacy custom command.
+All attached conditions must pass. Structured blockers and bounded timer backoff
+are implemented, with Recheck in the app and CLI. Shared named configurations,
+event-driven invalidation, and browser-assisted resolution remain proposed below.
+
 A task references named prerequisite configurations, and all attached prerequisites must pass before launch. Several tasks can share a configuration such as “Work network” or “Google Cloud work account.”
 
-Each check returns a structured result: `ready`, `blocked`, or `check_error`, with a safe explanation, check time, and next check time. Unknown or failed checks block execution. Configuration errors should be distinguished from temporary unavailability so the interface can suggest a useful next action.
+Assume the task already works when run manually. Prerequisites answer whether its
+execution environment is ready now; they are not a second validation system for
+the application's installation, `.env` contents, API keys, database schema, or
+business inputs. A known setup defect should be reported for correction rather
+than turned into a recurring check. Explicitly requested project-specific
+conditions remain supported.
+
+Each check returns a structured result: `ready`, `waiting`, `action_required`, or
+`check_error`, with a safe explanation, check time, and next check time. Every
+non-ready result prevents launch and retains the pending run:
+
+| Result | Meaning | Scheduler and UI behavior |
+| --- | --- | --- |
+| Ready | The checked condition is satisfied. | Continue checking remaining prerequisites. |
+| Waiting | A transient condition is unavailable: network unreachable, connection timeout, or temporarily unavailable service. | Recheck with bounded backoff and after relevant events; show what the task is waiting for. |
+| Action required | Evidence indicates a change is needed: expired login, rejected SSH credentials, missing required tool, or denied access. | Show the specific corrective action and offer Recheck. Rechecks may discover a fix made outside the app; repeatedly checking must not repeat an attention notification. |
+| Check error | The probe failed to establish readiness, for example an unexpected provider response. | Keep pending, show an inconclusive check, and retry with bounded backoff. Do not invent a credential or configuration diagnosis. |
+
+These are readiness results, not terminal run outcomes. “Action required” is
+preferable to “permanent”: the condition can recover after the user changes it.
+A network failure alone is not evidence of expired credentials. Providers should
+classify only failures they can identify reliably; ambiguous failures stay
+inconclusive. Record the result in Activity as well as the task's blocker.
 
 Check commands have short timeouts and bounded output. Cache and deduplicate checks by configuration revision and effective execution context, including the resolved credential source, account, configuration paths, and relevant environment. Two tasks referencing the same prerequisite may still require separate results if their execution contexts differ. Apply freshness rules appropriate to the provider. Check scheduling and user-assisted actions use separate capacity from normal task execution, so blocked tasks cannot exhaust execution slots.
 
 | Provider | Readiness check | Optional resolution |
 | --- | --- | --- |
 | Network or VPN | Probe a configured internal DNS, TCP, or HTTPS endpoint. Add a connection-specific check when the requirement is explicitly a particular VPN. | Explain how to connect, then offer Recheck. |
+| SSH | Run a harmless noninteractive command against a configured host alias, using the task's SSH configuration and normal host verification. Network unavailability waits; identified authentication or host-trust failures require action. | Explain how to renew credentials or verify the host outside the scheduler, then offer Recheck. |
+| BigQuery (`bq`) | Check the configured CLI credential context and, when needed, a small read-only probe of the required project or dataset. Never scan the task's workload as a readiness check. Identified login or access failures require action; service and network unavailability wait. | Explain the appropriate login or access change, then offer Recheck. |
 | Google Cloud CLI credentials | Verify usable credentials for the configured account and CLI configuration in the task's execution environment. | Run the corresponding local browser sign-in command. |
 | Google Application Default Credentials | Verify the ADC source actually selected by the task's environment. | Offer a compatible login action when that source supports it. |
 | Custom command | Run a configured check; exit 0 means ready, exit 1 means blocked, and other exits, launch failures, or timeouts mean check error. | Display creator-supplied instructions in v1. |
+
+Standard providers are the default for agents and the UI. Their configuration
+should describe the target and credential context, not require an agent-authored
+shell script. The skill must describe the available providers and select them
+before considering a custom check. Custom commands retain their legacy exit-code
+contract unless they explicitly opt into a richer result protocol; an exit code
+alone must not be reinterpreted as evidence that a user change is required.
 
 An internal endpoint probe demonstrates reachability, not proof that a specific VPN is active. Likewise, obtaining a Google token demonstrates credential usability, not permission for every intended API operation. Tasks still need normal failure handling after passing preflight checks.
 
@@ -232,7 +269,7 @@ The initial tool surface should cover:
 - Create, inspect, update, list, pause, resume, and remove task definitions.
 - Request a run and cancel a run.
 - List prerequisites and inspect or refresh their status.
-- List runs and read bounded execution logs and safe error summaries.
+- List runs and incrementally read execution logs and safe error summaries.
 
 Creation accepts the schedule, time zone, executable configuration, prerequisite references, and execution policy. Responses contain stable task and run IDs plus readable schedule and status summaries. Mutations accept an idempotency key so a retried request does not create duplicate work; updates also carry an expected revision to reject stale edits. A scheduling call succeeds only after its state is committed durably.
 

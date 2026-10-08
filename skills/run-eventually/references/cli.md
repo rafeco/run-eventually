@@ -13,6 +13,10 @@ variables, not literal CLI arguments.
 "$cli" list
 "$cli" runs
 "$cli" activity
+"$cli" checks "$task_id"
+"$cli" add-check "$task_id" bq --project work-project --dataset metrics
+"$cli" check-now "$task_id"
+"$cli" recheck "$task_id"
 
 "$cli" add-daily 07:00 America/New_York project-refresh --paused \
   --cwd "$project" \
@@ -38,10 +42,15 @@ Replace sample names, times, paths, and targets with the user's request. Verify
 selection, insert `--database "$database"` immediately after `"$cli"` on every
 call. `RUN_EVENTUALLY_DB` also selects state.
 
-Checks return 0 for ready, 1 for blocked, and another code for a check error. All
+For standard network/VPN, SSH, and BigQuery providers, read
+[readiness.md](readiness.md) before writing a custom check. Standard checks are
+additive; they and the optional custom check must all pass.
+
+Custom checks return 0 for ready, 1 for blocked, and another code for a check error. All
 nonzero exits, launch errors, and timeouts prevent execution. Failure messages map
-nonzero codes to safe explanations. Only one check can be attached; `set-check`
-replaces it. Preserve all conditions still needed when changing an existing check.
+nonzero codes to safe explanations. Only one custom check can be attached;
+`set-check` replaces that custom check while retaining standard checks. Preserve
+all conditions still needed when changing an existing check.
 
 ## Inspection
 
@@ -96,6 +105,8 @@ Swift's reference date (2001-01-01 UTC), not Unix time.
 - Scheduling polls about once a minute. Durable creation does not prove the
   scheduler is running. `tick` can execute due work from the whole database;
   reserve it for authorized execution or isolated tests.
-- The preview stores bounded command output in SQLite. Commands and checks
+- The preview stores complete task output in per-run stdout/stderr files referenced
+  by SQLite, with bounded legacy previews in the run payload. The desktop follows
+  those files live without display truncation. Commands and checks
   should produce safe summaries. Browser-assisted sign-in and arbitrary
   interactive input are not implemented; users authenticate independently.
