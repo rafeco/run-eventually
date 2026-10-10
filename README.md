@@ -85,7 +85,7 @@ distribution are still to be built.
 
 ## Standard readiness checks
 
-Attach network/VPN, SSH, and BigQuery checks with `add-check`; all attached checks
+Attach network/VPN, SSH, Smallstep certificate, and BigQuery checks with `add-check`; all attached checks
 must pass before launch. They use the task's working directory and environment.
 For example, using the installed CLI and the ID returned when creating a task:
 
@@ -98,8 +98,17 @@ For example, using the installed CLI and the ID returned when creating a task:
 ```
 
 Select only the conditions the task needs. `vpn` is an alias for an endpoint
-reachability check. SSH runs `true` with batch authentication and host verification;
-it does not accept new host keys. BigQuery uses `bq` to list at most one dataset
+reachability check. SSH runs `true` with batch authentication and the existing
+SSH host-verification policy; it does not change SSH configuration or prompt for
+host acceptance. Configured SSH helpers can still open SSO even with BatchMode.
+For Smallstep/Okta hosts, use `add-check TASK_ID smallstep --subject person@example.com
+--principal person` instead. This reads existing user certificates from the task's
+SSH agent using `step`, checks the subject, principal, and validity with a 60-second
+expiry margin, and never connects, renews, or starts login. Missing/expired
+certificates require interactive renewal by the user; inspection failures are check
+errors. Local validity does not prove server trust or authorization. Add a separate
+network check for the destination if needed, and remove custom SSH polling probes.
+BigQuery uses `bq` to list at most one dataset
 or read a specified dataset's metadata, without running queries. Metadata access
 does not prove permission to run every query. Configure the task's existing
 credential context rather than copying secrets into its definition.

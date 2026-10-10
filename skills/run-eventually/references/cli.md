@@ -42,7 +42,7 @@ Replace sample names, times, paths, and targets with the user's request. Verify
 selection, insert `--database "$database"` immediately after `"$cli"` on every
 call. `RUN_EVENTUALLY_DB` also selects state.
 
-For standard network/VPN, SSH, and BigQuery providers, read
+For standard network/VPN, SSH, Smallstep certificates, and BigQuery providers, read
 [readiness.md](readiness.md) before writing a custom check. Standard checks are
 additive; they and the optional custom check must all pass.
 

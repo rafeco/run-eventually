@@ -11,13 +11,18 @@ uses existing dashboard code without modifying its Makefile.
 
 ## Readiness
 
-`check.py` runs in the dashboard's existing Python environment and requires:
+The task uses the scheduler's standard checks for:
 
 1. The production SSH endpoint `10.248.22.135:22` is reachable.
-2. Google CLI credentials can obtain a token for the `bq` steps.
-3. ADC credentials can obtain a token for the Makefile's own auth check.
-4. Python ADC can refresh using the dashboard's `.env` configuration.
-5. SSH can authenticate with no terminal interaction or host-key prompt.
+2. BigQuery metadata access to `etsy-data-warehouse-prod:etsy_atlas` through the
+   task's `bq` credential context.
+3. The local Smallstep SSH agent has an unexpired user certificate for the configured subject and principal. Polling never connects or starts SSO.
+
+`check.py --adc-only` retains the two conditions not yet covered by standard
+providers: ADC credentials for the Makefile's auth check and Python ADC refresh
+using the dashboard's actual credential configuration. It does not repeat the
+standard network, Smallstep certificate, or BigQuery checks. Without that flag, the script retains
+its original composite behavior for older task definitions.
 
 Google CLI credentials and ADC are separate configurations; see
 [Google's authentication guide](https://docs.cloud.google.com/sdk/docs/authenticate).
@@ -33,14 +38,14 @@ Run the check manually to see an actionable explanation:
 ```sh
 cd ~/pe-dashboard
 /opt/homebrew/bin/uv run --no-sync python -B \
-  ~/run-eventually/examples/pe-dashboard/check.py --project-dir "$PWD"
+  ~/run-eventually/examples/pe-dashboard/check.py --project-dir "$PWD" --adc-only
 ```
 
-The app displays a configured, safe blocker message for each exit code: 11 for
-network, 12 for CLI credentials, 13 for ADC, 14 for Python ADC, 15 for SSH, and 2
-for local setup. It shows the last unsuccessful check time. Raw auth output is
-discarded. Update an existing task's mapping with `configure-check.sh TASK_ID`.
-Each CLI/SSH check is bounded, with a 60-second overall scheduler check timeout.
+Standard checks show Waiting, Action required, or Check error. The remaining
+custom check displays safe blocker messages for 13 (ADC) and 14 (Python ADC).
+Raw auth output is discarded. Update an existing task's checks with
+`configure-check.sh TASK_ID`; adding an equivalent standard check reuses its ID.
+The task's current enabled/paused state is preserved. Checks remain bounded.
 
 For Google authorization, sign in explicitly in Terminal:
 
@@ -105,3 +110,8 @@ failure, and readiness. Actual end-to-end acceptance still requires a successful
 pipeline, a real sleep/wake catch-up, and testing SSH credentials in the login
 service environment. The initial live probe on October 4, 2026 reached port 22
 but found Google CLI authorization and noninteractive SSH unavailable.
+
+The configuration script defaults Smallstep subject to `$USER@etsy.com` and
+principal to `$USER`; override `SMALLSTEP_SUBJECT` and `SMALLSTEP_PRINCIPAL` for
+another identity. Renew expired SSH certificates through your normal interactive
+login. Certificate validity does not prove remote authorization.

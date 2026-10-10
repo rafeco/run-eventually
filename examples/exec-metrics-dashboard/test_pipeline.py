@@ -93,6 +93,30 @@ class PipelineTests(unittest.TestCase):
                      patch.object(preflight.shared, "adc_ready", return_value=adc):
                     self.assertEqual(preflight.check(project), expected)
 
+    def test_adc_only_never_connects_over_ssh(self):
+        for adc, expected in [(True, 0), (False, 14)]:
+            with patch.object(preflight.shared, 'command_ready', return_value=True) as command, \
+                 patch.object(preflight.shared, 'adc_ready', return_value=adc):
+                self.assertEqual(preflight.check(Path('/unused'), adc_only=True), expected)
+                self.assertEqual(command.call_count, 1)
+                self.assertEqual(command.call_args.args[0][0], 'gcloud')
+        with patch.object(preflight.shared, 'command_ready', return_value=False), \
+             patch.object(preflight.shared, 'adc_ready') as adc:
+            self.assertEqual(preflight.check(Path('/unused'), adc_only=True), 13)
+            adc.assert_not_called()
+
+    def test_remaining_check_preserves_adc_and_remote_runtime(self):
+        for outcomes, adc, expected in [([False], True, 13), ([True], False, 14),
+                                        ([True, False], True, 15), ([True, True], True, 0)]:
+            with self.subTest(expected=expected), \
+                 patch.object(preflight.shared, 'command_ready', side_effect=outcomes) as command, \
+                 patch.object(preflight.shared, 'adc_ready', return_value=adc):
+                self.assertEqual(preflight.check(Path('/unused'), remaining_only=True), expected)
+                self.assertEqual(command.call_args_list[0].args[0],
+                    ['gcloud', 'auth', 'application-default', 'print-access-token', '--quiet'])
+                if expected in (15, 0):
+                    self.assertIn('command -v tmux', command.call_args_list[-1].args[0][-1])
+
 
 if __name__ == "__main__":
     unittest.main()

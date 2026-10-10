@@ -38,7 +38,7 @@ import Testing
         #expect(command.arguments.contains("--apilog=/dev/null"))
         let ssh = ReadinessRunner.command(for: ReadinessCheck(provider: .ssh(host: "work")), context: context)
         #expect(ssh.arguments.contains("BatchMode=yes"))
-        #expect(ssh.arguments.contains("StrictHostKeyChecking=yes"))
+        #expect(!ssh.arguments.contains { $0.hasPrefix("StrictHostKeyChecking=") })
         #expect(ssh.arguments.last == "true")
         #expect(throws: ReadinessConfigurationError.self) {
             try ReadinessCheck(provider: .ssh(host: "-oProxyCommand=bad")).validate()

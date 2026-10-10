@@ -57,7 +57,7 @@ on the same database. Never silently replace test state with live state.
   conditions, not application setup: do not add recurring checks for API keys in
   `.env`, dependencies, schema, or business inputs by default. Report a known
   setup problem separately; honor explicitly requested project conditions.
-- Prefer standard network/VPN, SSH, and BigQuery readiness providers when the
+- Prefer standard network/VPN, SSH, Smallstep certificates, and BigQuery readiness providers when the
   selected interface exposes them. Read [references/readiness.md](references/readiness.md)
   for provider configuration, blocker classification, and supported commands.
   Use a custom check only for a condition the providers do not cover, or when

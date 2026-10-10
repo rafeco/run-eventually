@@ -66,6 +66,20 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(options["stdin"], preflight.subprocess.DEVNULL)
             self.assertEqual(options["timeout"], 10)
 
+    def test_adc_only_preserves_adc_without_repeating_standard_probes(self):
+        with patch.object(preflight, "network_ready") as network, \
+             patch.object(preflight, "command_ready", return_value=True) as command, \
+             patch.object(preflight, "adc_ready", return_value=True) as adc:
+            self.assertEqual(preflight.check(Path('/unused'), 'unused', adc_only=True), 0)
+            network.assert_not_called()
+            command.assert_called_once_with(['gcloud', 'auth', 'application-default', 'print-access-token', '--quiet'])
+            adc.assert_called_once()
+        with patch.object(preflight, "command_ready", return_value=False):
+            self.assertEqual(preflight.check(Path('/unused'), 'unused', adc_only=True), 13)
+        with patch.object(preflight, "command_ready", return_value=True), \
+             patch.object(preflight, "adc_ready", return_value=False):
+            self.assertEqual(preflight.check(Path('/unused'), 'unused', adc_only=True), 14)
+
 
 if __name__ == "__main__":
     unittest.main()

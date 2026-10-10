@@ -20,6 +20,7 @@ Usage:
   run-eventually [--database PATH] set-check TASK_ID [--timeout-seconds N] [--failure-message CODE=MESSAGE] [--cwd PATH] [--env KEY=VALUE] -- EXECUTABLE [ARG ...]
   run-eventually [--database PATH] add-check TASK_ID network --host HOST --port PORT [--timeout-seconds N]
   run-eventually [--database PATH] add-check TASK_ID ssh --host HOST_ALIAS [--timeout-seconds N]
+  run-eventually [--database PATH] add-check TASK_ID smallstep --subject SUBJECT --principal PRINCIPAL [--timeout-seconds N]
   run-eventually [--database PATH] add-check TASK_ID bq --project PROJECT [--dataset DATASET] [--timeout-seconds N]
   run-eventually [--database PATH] checks TASK_ID
   run-eventually [--database PATH] remove-check TASK_ID CHECK_ID|custom
@@ -116,8 +117,9 @@ private func main() throws {
         switch providerName {
         case "network", "vpn": allowed = ["--host", "--port", "--timeout-seconds"]
         case "ssh": allowed = ["--host", "--timeout-seconds"]
+        case "smallstep": allowed = ["--subject", "--principal", "--timeout-seconds"]
         case "bq": allowed = ["--project", "--dataset", "--timeout-seconds"]
-        default: throw CLIError.usage("Unknown readiness provider. Use network, vpn, ssh, or bq.")
+        default: throw CLIError.usage("Unknown readiness provider. Use network, vpn, ssh, smallstep, or bq.")
         }
         var options: [String: String] = [:]
         var index = 2
@@ -138,6 +140,11 @@ private func main() throws {
         case "ssh":
             guard let host = options["--host"] else { throw CLIError.usage("SSH check requires --host.") }
             provider = .ssh(host: host)
+        case "smallstep":
+            guard let subject = options["--subject"], let principal = options["--principal"] else {
+                throw CLIError.usage("Smallstep check requires --subject and --principal.")
+            }
+            provider = .smallstep(subject: subject, principal: principal)
         default:
             guard let project = options["--project"] else { throw CLIError.usage("BigQuery check requires --project.") }
             provider = .bigQuery(project: project, dataset: options["--dataset"])

@@ -51,17 +51,17 @@ def adc_ready(project_dir):
         return False
 
 
-def check(project_dir, host):
-    if not (project_dir / "Makefile").is_file():
+def check(project_dir, host, adc_only=False):
+    if not adc_only and not (project_dir / "Makefile").is_file():
         print("BLOCKED: dashboard directory or Makefile missing.")
         return 2
-    if any(shutil.which(tool) is None for tool in ("gcloud", "bq", "uv", "make")):
+    if not adc_only and any(shutil.which(tool) is None for tool in ("gcloud", "bq", "uv", "make")):
         print("BLOCKED: install gcloud, bq, uv, and make; check the configured PATH.")
         return 2
-    if not network_ready(host):
+    if not adc_only and not network_ready(host):
         print("BLOCKED: production SSH endpoint unreachable. Connect the work VPN.")
         return 11
-    if not command_ready(["gcloud", "auth", "print-access-token", "--quiet"]):
+    if not adc_only and not command_ready(["gcloud", "auth", "print-access-token", "--quiet"]):
         print("BLOCKED: Google CLI authorization unavailable. Run gcloud auth login.")
         return 12
     if not command_ready(["gcloud", "auth", "application-default", "print-access-token", "--quiet"]):
@@ -70,14 +70,14 @@ def check(project_dir, host):
     if not adc_ready(project_dir):
         print("BLOCKED: Python ADC unavailable. Check .env credential overrides and run make auth.")
         return 14
-    if not command_ready([
+    if not adc_only and not command_ready([
         "/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
         "-o", "ConnectionAttempts=1",
         host, "true",
     ]):
         print("BLOCKED: SSH authorization unavailable. Renew SSH credentials or approve the host in Terminal.")
         return 15
-    print("READY: production endpoint, Google CLI, ADC, and noninteractive SSH.")
+    print("READY: ADC credentials." if adc_only else "READY: production endpoint, Google CLI, ADC, and noninteractive SSH.")
     return 0
 
 
@@ -85,5 +85,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-dir", type=Path, required=True)
     parser.add_argument("--host", default="10.248.22.135")
+    parser.add_argument("--adc-only", action="store_true", help="Check only the ADC conditions not covered by standard providers")
     args = parser.parse_args()
-    raise SystemExit(check(args.project_dir, args.host))
+    raise SystemExit(check(args.project_dir, args.host, adc_only=args.adc_only))

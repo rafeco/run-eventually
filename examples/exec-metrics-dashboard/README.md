@@ -21,7 +21,16 @@ stop the manually launched dashboard before the first scheduled deployment.
 Inspect with `ssh vm 'tmux attach -t exec-metrics-dashboard'` and
 `ssh vm 'tail -50 ~/exec-metrics-dashboard/dashboard.log'`. The task does not pull
 code, sync dependencies, start a stopped VM, or perform Google login. Readiness
-waits for local Google credentials, noninteractive SSH, and the VM runtime. Run
+uses an endpoint reachability check and the standard Smallstep certificate provider, with a smaller custom check for
+local ADC. Polling never connects to the VM; runtime validation occurs during
+task execution. It does not add a `bq` check because
+the ETL uses Python ADC rather than `bq` credentials. The custom check runs with
+`--adc-only`; its original composite mode remains available for older
+definitions, but can trigger SSO and should not be used for polling.
+Override `SMALLSTEP_SUBJECT` and `SMALLSTEP_PRINCIPAL` when configuring another
+identity (defaults are `$USER@etsy.com` and `$USER`). `EXEC_METRICS_SSH_HOST`
+sets the direct network endpoint (default `rcolburn.etsyweb.devenv.etsycloud.com`);
+use the host behind the SSH alias, not the alias itself. Run
 `sshvm` yourself if the VM needs starting, and authenticate locally as prompted
 by Run Eventually. The existing scheduler LaunchAgent must remain running.
 

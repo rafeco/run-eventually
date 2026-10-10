@@ -16,12 +16,14 @@ public enum ReadinessStatus: String, Codable, Sendable {
 public enum ReadinessProvider: Codable, Sendable, Equatable {
     case network(host: String, port: UInt16)
     case ssh(host: String)
+    case smallstep(subject: String, principal: String)
     case bigQuery(project: String, dataset: String?)
 
     public var description: String {
         switch self {
         case .network(let host, let port): "Network / VPN: \(host):\(port)"
         case .ssh(let host): "SSH: \(host)"
+        case .smallstep(let subject, let principal): "Smallstep certificate: \(subject) (\(principal))"
         case .bigQuery(let project, let dataset): "BigQuery: \(project)\(dataset.map { ":" + $0 } ?? "")"
         }
     }
@@ -55,6 +57,10 @@ public struct ReadinessCheck: Codable, Identifiable, Sendable, Equatable {
             guard valid(host, allowed: hostCharacters) else {
                 throw ReadinessConfigurationError.invalid("SSH check needs a host alias or user@host.")
             }
+        case .smallstep(let subject, let principal):
+            guard valid(subject, allowed: hostCharacters), valid(principal, allowed: hostCharacters) else {
+                throw ReadinessConfigurationError.invalid("Smallstep check needs a certificate subject and SSH principal.")
+            }
         case .bigQuery(let project, let dataset):
             let identifiers = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
             guard valid(project, allowed: identifiers), dataset.map({ valid($0, allowed: identifiers) }) ?? true else {
@@ -80,11 +86,14 @@ public enum ReadinessRunner {
     /// Raw provider output is used only for classification and never persisted.
     public static func run(_ check: ReadinessCheck, context: CommandSpec,
         execute: (CommandSpec, TimeInterval) throws -> CommandOutcome = {
-            try CommandRunner.run($0, timeoutSeconds: $1, outputLimitBytes: 8_192)
+            try CommandRunner.run($0, timeoutSeconds: $1, outputLimitBytes: 65_536)
         }
     ) -> ReadinessResult {
         do {
             try check.validate()
+            if case .smallstep = check.provider {
+                return try SmallstepReadiness.run(check, context: context, execute: execute)
+            }
             let command = command(for: check, context: context)
             return classify(try execute(command, check.timeoutSeconds), provider: check.provider)
         } catch is ReadinessConfigurationError {
@@ -106,9 +115,15 @@ public enum ReadinessRunner {
             command.arguments = ["-z", "-G", timeout, "-w", timeout, host, String(port)]
         case .ssh(let host):
             command.executable = "/usr/bin/ssh"
-            command.arguments = ["-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            // Preserve the user's managed host-verification policy. BatchMode
+            // prevents SSH prompts, but configured ProxyCommand/Match hooks can still
+            // start login. Use the Smallstep provider for SSO-managed hosts.
+            command.arguments = ["-T", "-a", "-x", "-o", "BatchMode=yes",
                 "-o", "UpdateHostKeys=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no",
                 "-o", "RemoteCommand=none", "-o", "ConnectTimeout=\(max(1, Int(ceil(check.timeoutSeconds))))", host, "true"]
+        case .smallstep(let subject, _):
+            command.executable = "step"
+            command.arguments = ["ssh", "list", "--raw", subject]
         case .bigQuery(let project, let dataset):
             command.executable = "bq"
             command.environment["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
@@ -140,6 +155,8 @@ public enum ReadinessRunner {
             if contains(["connection refused", "connection timed out", "no route to host", "network is unreachable", "could not resolve hostname", "connection reset"]) {
                 return ReadinessResult(.waiting, "Waiting for the SSH endpoint. Check the network or VPN and remote service.")
             }
+        case .smallstep:
+            return ReadinessResult(.checkError, "Smallstep certificates require local inspection.")
         case .bigQuery:
             if contains(["invalid_grant", "invalid_rapt", "reauthentication is needed", "invalid authentication credentials", "invalid credentials", "gcloud auth login", "not have any active accounts", "do not currently have an active account", "login required", "access token has expired", "token has been expired or revoked"]) {
                 return ReadinessResult(.actionRequired, "BigQuery sign-in needs attention. Renew the credentials used by this task; for a user CLI login, run gcloud auth login.")

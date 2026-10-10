@@ -18,13 +18,12 @@ created=$("$cli" add-daily "$daily_time" America/New_York exec-metrics-dashboard
     python -B "$example_dir/run.py" --project-dir "$dashboard_dir")
 task_id="${created##*(}"
 task_id="${task_id%)}"
+"$cli" add-check "$task_id" network --host "${EXEC_METRICS_SSH_HOST:-rcolburn.etsyweb.devenv.etsycloud.com}" --port 22
+"$cli" add-check "$task_id" smallstep --subject "${SMALLSTEP_SUBJECT:-${USER}@etsy.com}" --principal "${SMALLSTEP_PRINCIPAL:-$USER}"
 "$cli" set-check "$task_id" --timeout-seconds 60 \
-    --failure-message '2=Local dashboard or tools missing. Check ~/product-metrics-dashboard and PATH.' \
-    --failure-message '12=Local Google CLI credentials unavailable. Run gcloud auth login in Terminal.' \
     --failure-message '13=Local Google ADC unavailable. Run make auth in ~/product-metrics-dashboard.' \
     --failure-message '14=Local Python Google credentials unavailable. Check dashboard configuration and run make auth.' \
-    --failure-message '15=Waiting for the VM. Connect the work network, start the VM with sshvm, and renew SSH credentials if needed. The VM needs tmux and its dashboard Python environment.' \
     --cwd "$dashboard_dir" --env "PATH=$task_path" --env CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
-    -- /opt/homebrew/bin/uv run --no-sync python -B "$example_dir/check.py" --project-dir "$dashboard_dir"
+    -- /opt/homebrew/bin/uv run --no-sync python -B "$example_dir/check.py" --project-dir "$dashboard_dir" --adc-only
 "$cli" resume "$task_id"
 echo "Configured exec-metrics-dashboard-refresh ($task_id) for $daily_time America/New_York."
