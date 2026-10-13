@@ -15,6 +15,24 @@ public enum SchedulePlanner {
     // or ancient cursor is presented to the scheduler.
     private static let maximumEvaluationDays = 100_000
 
+    /// Upcoming schedule occurrence for display; does not queue or consume work.
+    public static func nextOccurrence(for schedule: TaskSchedule, after date: Date) throws -> Date? {
+        guard date.timeIntervalSinceReferenceDate.isFinite else { throw SchedulePlannerError.invalidDate }
+        switch schedule {
+        case .once(let scheduledAt):
+            guard scheduledAt.timeIntervalSinceReferenceDate.isFinite else { throw SchedulePlannerError.invalidDate }
+            return scheduledAt > date ? scheduledAt : nil
+        case .daily(let hour, let minute, let timeZoneID):
+            guard (0...23).contains(hour) else { throw SchedulePlannerError.invalidHour(hour) }
+            guard (0...59).contains(minute) else { throw SchedulePlannerError.invalidMinute(minute) }
+            guard let zone = TimeZone(identifier: timeZoneID) else { throw SchedulePlannerError.invalidTimeZone(timeZoneID) }
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = zone
+            return calendar.nextDate(after: date, matching: DateComponents(hour: hour, minute: minute, second: 0),
+                matchingPolicy: .nextTime, repeatedTimePolicy: .first)
+        }
+    }
+
     public static func dueWindow(
         for schedule: TaskSchedule,
         after cursor: Date,

@@ -5,7 +5,7 @@ public enum ActivityKind: String, Codable, Sendable {
     case cycleStarted, cycleFinished, waiting, scheduleChecked
     case taskCreated, taskUpdated, runRequested, runRequestRejected, workDue, runHeld, runRecovered, eligibilityChecked
     case checkStarted, checkPassed, checkBlocked, checkFailed
-    case runStarted, runSucceeded, runFailed
+    case runStarted, runSucceeded, runFailed, runResumed, runStopRequested
 
     public var isCheck: Bool {
         switch self {

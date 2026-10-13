@@ -91,6 +91,20 @@ public enum RunTrigger: String, Codable, Sendable {
     case scheduledAndManual
 }
 
+public struct ReadinessObservation: Codable, Sendable, Equatable {
+    public var checkID: UUID
+    public var status: ReadinessStatus
+    public var message: String
+    public var checkedAt: Date
+
+    public init(checkID: UUID, status: ReadinessStatus, message: String, checkedAt: Date) {
+        self.checkID = checkID
+        self.status = status
+        self.message = message
+        self.checkedAt = checkedAt
+    }
+}
+
 public struct RunRecord: Codable, Sendable, Identifiable, Equatable {
     public var id: UUID
     public var taskID: UUID
@@ -100,6 +114,8 @@ public struct RunRecord: Codable, Sendable, Identifiable, Equatable {
     public var state: RunState
     public var createdAt: Date
     public var startedAt: Date?
+    public var lastWakeAt: Date?
+    public var stopRequestedAt: Date?
     public var finishedAt: Date?
     public var exitCode: Int32?
     public var blockerReason: String?
@@ -111,6 +127,7 @@ public struct RunRecord: Codable, Sendable, Identifiable, Equatable {
     public var trigger: RunTrigger?
     public var lastCheckedAt: Date?
     public var readinessStatus: ReadinessStatus?
+    public var readinessObservations: [ReadinessObservation]?
     public var nextCheckAt: Date?
     public var consecutiveCheckFailures: Int?
 

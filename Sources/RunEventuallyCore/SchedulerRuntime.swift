@@ -9,6 +9,8 @@ public struct SchedulerRuntime: Codable, Sendable, Equatable {
     public let processID: Int32
     public let executableDigest: String
     public let supportsGracefulShutdown: Bool
+    public var supportsGlobalPause: Bool? = nil
+    public var supportsRunCancellation: Bool? = nil
 
     public static func executableDigest(at url: URL) throws -> String {
         SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()

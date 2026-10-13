@@ -99,3 +99,45 @@ import Testing
         )
     }
 }
+
+@Test func taskDeadlineIncludesSleepAndReportsWakeWithoutWaitingAnHour() throws {
+    var samples = 0
+    var wakes = 0
+    let result = try CommandRunner.run(CommandSpec(executable: "/bin/sleep", arguments: ["10"]),
+        timeoutSeconds: 60, onWake: { wakes += 1 }, clock: {
+            samples += 1
+            return samples == 1 ? ExecutionClockSample(continuous: 0, awake: 0)
+                : ExecutionClockSample(continuous: 120, awake: 1)
+        })
+    #expect(result.timedOut)
+    #expect(result.stopReason == .timeoutAfterSleep)
+    #expect(wakes == 1)
+}
+
+@Test func shortSleepDoesNotCancelWorkingCommand() throws {
+    var clock = ExecutionDeadline(start: ExecutionClockSample(continuous: 0, awake: 0), timeout: 3600)
+    let woke = clock.observe(ExecutionClockSample(continuous: 31, awake: 1))
+    #expect(woke)
+    #expect(clock.remaining(at: ExecutionClockSample(continuous: 31, awake: 1)) == 3569)
+    #expect(clock.slept)
+    let wokeAgain = clock.observe(ExecutionClockSample(continuous: 32, awake: 2))
+    #expect(!wokeAgain)
+}
+
+@Test func gracefulCancellationStopsChildrenAndAllowsCleanup() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let ready = root.appendingPathComponent("ready")
+    let cleaned = root.appendingPathComponent("cleaned")
+    let escaped = root.appendingPathComponent("escaped")
+    let script = "trap 'touch \"$2\"; exit 0' TERM; (sleep 3; touch \"$3\") & touch \"$1\"; wait"
+    let result = try CommandRunner.run(CommandSpec(executable: "/bin/sh", arguments:
+        ["-c", script, "test", ready.path, cleaned.path, escaped.path]), timeoutSeconds: 10,
+        shouldStop: { FileManager.default.fileExists(atPath: ready.path) })
+    #expect(result.stopReason == .cancelled)
+    #expect(!result.timedOut)
+    #expect(FileManager.default.fileExists(atPath: cleaned.path))
+    Thread.sleep(forTimeInterval: 3.1)
+    #expect(!FileManager.default.fileExists(atPath: escaped.path))
+}

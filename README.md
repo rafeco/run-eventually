@@ -113,8 +113,18 @@ or read a specified dataset's metadata, without running queries. Metadata access
 does not prove permission to run every query. Configure the task's existing
 credential context rather than copying secrets into its definition.
 
-The app shows **Waiting**, **Action required**, or **Check error** and the next
-check time. Transient and inconclusive failures back off from one minute to a
+The sidebar leads with the task name, schedule, and current status. **Later Today**
+means today's scheduled time has not arrived; it does not create a pending run or
+reuse yesterday's success as today's status. The last successful run is shown
+separately. Running jobs from older scheduler versions show checks as **Passed**
+at launch when individual results were not recorded.
+
+The app presents pending work as **Waiting**, with compact Network, SSH, and
+Google Cloud pills showing the latest per-check result. A check skipped because
+an earlier prerequisite blocked the scan shows **Not checked**, never an assumed
+success. Sign-in instructions and diagnostic details are available under
+**Waiting details**; waiting is an ordinary queued state. The CLI and scheduler
+retain the readiness categories and the app shows the next check time. Transient and inconclusive failures back off from one minute to a
 maximum of fifteen; action-required conditions recheck every five minutes.
 **Recheck**, or `recheck TASK_ID`, clears that delay for the next scheduler scan.
 `check-now` probes without launching a task or modifying its schedule (exit 2 if
@@ -176,3 +186,34 @@ or ask, “Use Run Eventually to run this project's FX refresh every morning at
 
 If the executable is outside the usual app or development locations, provide its
 absolute path in the session or set `RUN_EVENTUALLY_CLI` for skill discovery.
+
+### Pause and interrupted runs
+
+Use **Pause task** on a task row to hold that task until **Resume task** is chosen.
+Use **Pause all** in the Tasks status bar to pause scheduling globally until
+**Resume all** is chosen. These preferences survive app/service restarts; a global
+resume does not unpause individually paused tasks. Existing commands finish
+normally. Resume checks queued and missed work on the next scheduler scan.
+
+The status bar also shows when the scheduler is stopped, draining for a restart,
+or running a different build. A build mismatch alone does not imply that an
+otherwise running scheduler has paused. Older services advertise their capabilities;
+a requested global pause takes effect when the updated service starts.
+
+Task deadlines use a continuous clock: the one-hour run limit includes laptop
+sleep. Waking is recorded in Activity and run details. After two minutes without
+new output following a wake, the app shows a quiet-progress notice. Quiet output
+alone does not prove a stalled command and does not trigger an automatic retry.
+
+**Stop run** asks the scheduler to signal the command's verified, isolated local
+process group, allowing one second of cleanup before forcing remaining local
+processes to exit. The run becomes **Cancelled** and keeps its logs and reason.
+Timeouts are **Failed**, with a specific explanation if sleep crossed the deadline.
+Remote jobs can continue after local processes stop; inspect output before using
+**Run now** to retry. Neither cancellation nor a timeout automatically reruns a
+command. The new stop control requires an updated scheduler.
+
+Check pills appear in the sidebar only while work is pending. Filled backgrounds
+use white text for ready/failed states and dark text for neutral waiting states.
+Failed or cancelled runs show a red reason pill; absent reasons are reported as
+unrecorded instead of inferred from arbitrary command output.

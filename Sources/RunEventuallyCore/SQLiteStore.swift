@@ -74,6 +74,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 )
                 """)
             try execute("CREATE INDEX IF NOT EXISTS runs_by_task ON runs(task_id, created_at)")
+            try execute("CREATE TABLE IF NOT EXISTS scheduler_control (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), payload BLOB NOT NULL)")
             try execute("""
                 CREATE TABLE IF NOT EXISTS scheduler_runtime (
                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -132,6 +133,7 @@ public final class SQLiteStore: @unchecked Sendable {
                     if var pending = try loadPendingRun(taskID: task.id) {
                         pending.nextCheckAt = nil
                         pending.readinessStatus = nil
+                        pending.readinessObservations = nil
                         pending.blockerReason = nil
                         pending.consecutiveCheckFailures = nil
                         try saveRun(pending)
@@ -147,6 +149,64 @@ public final class SQLiteStore: @unchecked Sendable {
 
     public func recordActivity(_ event: ActivityEvent) throws {
         try lock.withLock { try transaction { try appendActivityUnlocked(event) } }
+    }
+
+    private struct SchedulerControl: Codable { let isPaused: Bool }
+
+    private func loadSchedulerPaused() throws -> Bool {
+        try readOne("SELECT payload FROM scheduler_control WHERE singleton = 1", as: SchedulerControl.self)?.isPaused ?? false
+    }
+
+    public func schedulerPaused() throws -> Bool {
+        try lock.withLock { try loadSchedulerPaused() }
+    }
+
+    public func setSchedulerPaused(_ paused: Bool) throws {
+        try lock.withLock {
+            try transaction {
+                let statement = try prepare("INSERT OR REPLACE INTO scheduler_control(singleton, payload) VALUES (1, ?)")
+                defer { sqlite3_finalize(statement) }
+                try bind(encoder.encode(SchedulerControl(isPaused: paused)), to: statement, at: 1)
+                try stepDone(statement)
+                try appendActivityUnlocked(ActivityEvent(kind: .taskUpdated,
+                    message: paused ? "All scheduling paused until resumed. Running commands are unaffected."
+                        : "Scheduling resumed; queued and missed work will be checked on the next scan."))
+            }
+        }
+    }
+
+    public func setTaskPaused(taskID: UUID, paused: Bool) throws {
+        try lock.withLock {
+            try transaction {
+                guard var task = try loadTask(id: taskID) else { throw SQLiteStoreError.missingTask(taskID) }
+                task.isPaused = paused
+                try saveTask(task)
+                try appendActivityUnlocked(ActivityEvent(kind: .taskUpdated,
+                    message: paused ? "Task paused until resumed. Running commands are unaffected." : "Task resumed.", taskID: taskID))
+            }
+        }
+    }
+
+    public func requestStop(runID: UUID) throws {
+        try lock.withLock {
+            try transaction {
+                guard var run = try loadRun(id: runID), run.state == .running else { return }
+                run.stopRequestedAt = Date()
+                try saveRun(run)
+                try appendActivityUnlocked(ActivityEvent(kind: .runStopRequested,
+                    message: "Graceful stop requested. A retry must be requested separately after the run stops.", taskID: run.taskID, runID: run.id))
+            }
+        }
+    }
+
+    public func recordWake(runID: UUID, at date: Date) throws {
+        try lock.withLock {
+            try transaction {
+                guard var run = try loadRun(id: runID), run.state == .running else { return }
+                run.lastWakeAt = date
+                try saveRun(run)
+            }
+        }
     }
 
     public func schedulerRuntime() throws -> SchedulerRuntime? {
@@ -229,7 +289,7 @@ public final class SQLiteStore: @unchecked Sendable {
     /// Update its blocker without overwriting the latest occurrence data.
     public func recordCheckBlocker(runID: UUID, reason: String,
         status: ReadinessStatus? = nil, checkedAt: Date = Date(), nextCheckAt: Date? = nil,
-        expectedTask: TaskDefinition? = nil) throws {
+        expectedTask: TaskDefinition? = nil, observations: [ReadinessObservation]? = nil) throws {
         try lock.withLock {
             try transaction {
                 guard var run = try loadRun(id: runID), run.state == .pending else { return }
@@ -240,6 +300,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 run.blockerReason = reason
                 run.lastCheckedAt = checkedAt
                 run.readinessStatus = status
+                run.readinessObservations = observations
                 run.nextCheckAt = nextCheckAt
                 run.consecutiveCheckFailures = (run.consecutiveCheckFailures ?? 0) + 1
                 try saveRun(run)
@@ -364,7 +425,7 @@ public final class SQLiteStore: @unchecked Sendable {
     public func claimPendingRun(id: UUID, at: Date, expectedTask: TaskDefinition? = nil) throws -> RunRecord? {
         try lock.withLock {
             try transaction {
-                guard var run = try loadRun(id: id), run.state == .pending,
+                guard try !loadSchedulerPaused(), var run = try loadRun(id: id), run.state == .pending,
                       let task = try loadTask(id: run.taskID), !task.isPaused,
                       try !hasUnresolvedRun(taskID: run.taskID)
                 else { return nil }

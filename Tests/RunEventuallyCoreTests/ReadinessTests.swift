@@ -85,6 +85,9 @@ import Testing
         var pending = try #require(try scheduler.store.listRuns(taskID: task.id).first)
         #expect(pending.state == .pending)
         #expect(pending.readinessStatus == .waiting)
+        #expect(pending.readinessObservations?.count == 1)
+        #expect(pending.readinessObservations?.first?.checkID == task.readinessChecks?.first?.id)
+        #expect(pending.readinessObservations?.first?.status == .waiting)
         #expect(pending.nextCheckAt == now.addingTimeInterval(60))
         #expect(try scheduler.tick(at: now.addingTimeInterval(30)) == nil)
         #expect(calls == 1)
@@ -98,7 +101,42 @@ import Testing
         #expect(finished.id == pending.id)
         #expect(finished.state == .succeeded)
         #expect(finished.readinessStatus == nil)
+        #expect(finished.readinessObservations?.map(\.status) == [.ready, .ready])
         #expect(try scheduler.store.listRuns(taskID: task.id).count == 1)
+    }
+
+    @Test func checkObservationsDescribeOnlyTheCurrentScanAndClearOnEdits() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date()
+        let network = ReadinessCheck(provider: .network(host: "work", port: 22))
+        let ssh = ReadinessCheck(provider: .ssh(host: "work"))
+        var task = TaskDefinition(name: "Morning", command: CommandSpec(executable: "/usr/bin/true"),
+            schedule: .once(now), scheduleCursor: now.addingTimeInterval(-1))
+        task.readinessChecks = [network, ssh]
+        var networkReady = true
+        let scheduler = try Scheduler(databasePath: root.appendingPathComponent("state.sqlite").path) { check, _ in
+            if check.id == network.id { return ReadinessResult(networkReady ? .ready : .waiting, "Network") }
+            return ReadinessResult(.actionRequired, "Sign in when ready")
+        }
+        try scheduler.store.insertTask(task)
+        #expect(try scheduler.tick(at: now) == nil)
+        let initial = try #require(try scheduler.store.listRuns(taskID: task.id).first)
+        #expect(initial.readinessObservations?.map(\.status) == [.ready, .actionRequired])
+        #expect(initial.readinessObservations?.allSatisfy { $0.checkedAt == now } == true)
+        let roundTrip = try JSONDecoder().decode(RunRecord.self, from: JSONEncoder().encode(initial))
+        #expect(roundTrip.readinessObservations == initial.readinessObservations)
+        networkReady = false
+        try scheduler.store.requestRecheck(taskID: task.id)
+        #expect(try scheduler.tick(at: now.addingTimeInterval(1)) == nil)
+        let next = try #require(try scheduler.store.run(id: initial.id))
+        #expect(next.readinessObservations?.map(\.checkID) == [network.id])
+        #expect(next.readinessObservations?.map(\.status) == [.waiting])
+        task.readinessChecks = [ssh]
+        try scheduler.store.updateTask(task)
+        let edited = try #require(try scheduler.store.run(id: initial.id))
+        #expect(edited.readinessObservations == nil)
     }
 
     @Test func actionRequiredAndCustomCheckBothHoldWork() throws {

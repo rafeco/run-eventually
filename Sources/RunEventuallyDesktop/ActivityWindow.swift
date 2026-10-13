@@ -253,6 +253,8 @@ private extension ActivityKind {
         case .checkPassed: "Ready"
         case .checkBlocked: "Not ready"
         case .checkFailed: "Check failed"
+        case .runResumed: "Resumed after sleep"
+        case .runStopRequested: "Stop requested"
         case .runStarted: "Running"
         case .runSucceeded: "Succeeded"
         case .runFailed: "Failed"

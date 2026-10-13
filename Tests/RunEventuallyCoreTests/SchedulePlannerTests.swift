@@ -143,3 +143,29 @@ private func instant(_ iso8601: String) -> Date {
         )
     }
 }
+
+@Test func nextOccurrenceShowsTodayBeforeItsTimeAndTomorrowAfterIt() throws {
+    let daily = TaskSchedule.daily(hour: 9, minute: 0, timeZoneID: "America/New_York")
+    #expect(try SchedulePlanner.nextOccurrence(for: daily, after: instant("2026-10-13T07:40:00-04:00"))
+        == instant("2026-10-13T09:00:00-04:00"))
+    #expect(try SchedulePlanner.nextOccurrence(for: daily, after: instant("2026-10-13T09:00:00-04:00"))
+        == instant("2026-10-14T09:00:00-04:00"))
+    let once = TaskSchedule.once(instant("2026-10-13T09:00:00-04:00"))
+    #expect(try SchedulePlanner.nextOccurrence(for: once, after: instant("2026-10-13T07:40:00-04:00"))
+        == instant("2026-10-13T09:00:00-04:00"))
+    #expect(try SchedulePlanner.nextOccurrence(for: once, after: instant("2026-10-13T09:00:00-04:00")) == nil)
+}
+
+@Test func nextOccurrenceUsesTheSchedulesZoneAndDaylightSavingPolicy() throws {
+    let tokyo = TaskSchedule.daily(hour: 9, minute: 0, timeZoneID: "Asia/Tokyo")
+    #expect(try SchedulePlanner.nextOccurrence(for: tokyo, after: instant("2026-10-13T23:00:00Z"))
+        == instant("2026-10-14T00:00:00Z"))
+    let gap = TaskSchedule.daily(hour: 2, minute: 30, timeZoneID: "America/New_York")
+    #expect(try SchedulePlanner.nextOccurrence(for: gap, after: instant("2026-03-08T00:00:00-05:00"))
+        == instant("2026-03-08T03:00:00-04:00"))
+    let fold = TaskSchedule.daily(hour: 1, minute: 30, timeZoneID: "America/New_York")
+    #expect(try SchedulePlanner.nextOccurrence(for: fold, after: instant("2026-11-01T00:00:00-04:00"))
+        == instant("2026-11-01T01:30:00-04:00"))
+    #expect(try SchedulePlanner.nextOccurrence(for: fold, after: instant("2026-11-01T01:30:00-04:00"))
+        == instant("2026-11-02T01:30:00-05:00"))
+}

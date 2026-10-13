@@ -2,17 +2,21 @@ import Darwin
 import Dispatch
 import Foundation
 
+public enum CommandStopReason: Sendable { case timeout, timeoutAfterSleep, cancelled }
+
 public struct CommandOutcome: Sendable {
     public let exitCode: Int32
     public let standardOutput: String
     public let standardError: String
     public let timedOut: Bool
+    public let stopReason: CommandStopReason?
 
-    public init(exitCode: Int32, standardOutput: String, standardError: String, timedOut: Bool) {
+    public init(exitCode: Int32, standardOutput: String, standardError: String, timedOut: Bool, stopReason: CommandStopReason? = nil) {
         self.exitCode = exitCode
         self.standardOutput = standardOutput
         self.standardError = standardError
         self.timedOut = timedOut
+        self.stopReason = stopReason
     }
 }
 
@@ -32,7 +36,10 @@ public enum CommandRunner {
         _ command: CommandSpec,
         timeoutSeconds: TimeInterval,
         outputLimitBytes: Int = 65_536,
-        logFiles: CommandLogFiles? = nil
+        logFiles: CommandLogFiles? = nil,
+        shouldStop: () -> Bool = { false },
+        onWake: () -> Void = {},
+        clock: () -> ExecutionClockSample = ExecutionClockSample.now
     ) throws -> CommandOutcome {
         guard timeoutSeconds.isFinite, timeoutSeconds > 0 else {
             throw CommandRunnerError.invalidTimeout
@@ -82,15 +89,38 @@ public enum CommandRunner {
         standardOutput.closeWriter()
         standardError.closeWriter()
 
-        var timedOut = false
-        if finished.wait(timeout: .now() + timeoutSeconds) == .timedOut && process.isRunning {
-            timedOut = true
-            // This signals the launched process, not descendants that it started.
-            // Give a cooperative command a short chance to clean up before forcing exit.
-            _ = Darwin.kill(process.processIdentifier, SIGTERM)
-            if finished.wait(timeout: .now() + 1.0) == .timedOut && process.isRunning {
-                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+        var deadline = ExecutionDeadline(start: clock(), timeout: timeoutSeconds)
+        var stopReason: CommandStopReason?
+        let pid = process.processIdentifier
+        // Foundation launches macOS Process children in their own process group.
+        // Verify isolation before signaling descendants; never signal our group.
+        let isolatedGroup = getpgid(pid) == pid && pid != getpgrp()
+        while process.isRunning {
+            let sample = clock()
+            if deadline.observe(sample) { onWake() }
+            if shouldStop() { stopReason = .cancelled }
+            else if deadline.remaining(at: sample) <= 0 {
+                stopReason = deadline.slept ? .timeoutAfterSleep : .timeout
             }
+            if stopReason != nil {
+                let graceDeadline = ExecutionClockSample.now().continuous + 1
+                _ = Darwin.kill(isolatedGroup ? -pid : pid, SIGTERM)
+                _ = finished.wait(timeout: .now() + 1.0)
+                if isolatedGroup {
+                    while Darwin.kill(-pid, 0) == 0 && ExecutionClockSample.now().continuous < graceDeadline {
+                        Thread.sleep(forTimeInterval: 0.05)
+                    }
+                }
+                // Parent exit does not prove its children exited. Close the whole
+                // verified group so orphaned SSH/Python processes cannot hold work.
+                if isolatedGroup {
+                    if Darwin.kill(-pid, 0) == 0 { _ = Darwin.kill(-pid, SIGKILL) }
+                } else if process.isRunning {
+                    _ = Darwin.kill(pid, SIGKILL)
+                }
+                break
+            }
+            if finished.wait(timeout: .now() + min(1, max(0.001, deadline.remaining(at: sample)))) == .success { break }
         }
         process.waitUntilExit()
         let output = try logFiles.map { try $0.preview(at: $0.output, limit: outputLimitBytes) }
@@ -102,7 +132,8 @@ public enum CommandRunner {
             exitCode: process.terminationStatus,
             standardOutput: output,
             standardError: errorOutput,
-            timedOut: timedOut
+            timedOut: stopReason == .timeout || stopReason == .timeoutAfterSleep,
+            stopReason: stopReason
         )
     }
 

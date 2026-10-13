@@ -66,6 +66,10 @@ public final class Scheduler {
     @discardableResult
     public func tick(at now: Date = Date()) throws -> RunRecord? {
         guard !shutdown.isRequested else { return nil }
+        if try store.schedulerPaused() {
+            try record(.waiting, "Scheduling paused until resumed. Running commands are unaffected.")
+            return nil
+        }
         do {
             try record(.cycleStarted, "Checking schedules and pending work.")
             let result = try reconcile(at: now)
@@ -85,7 +89,7 @@ public final class Scheduler {
             throw SchedulerError.cannotCreateLock("Unable to locate running executable")
         }
         try store.setSchedulerRuntime(SchedulerRuntime(sessionID: sessionID, processID: getpid(),
-            executableDigest: try SchedulerRuntime.executableDigest(at: executable), supportsGracefulShutdown: true))
+            executableDigest: try SchedulerRuntime.executableDigest(at: executable), supportsGracefulShutdown: true, supportsGlobalPause: true, supportsRunCancellation: true))
     }
 
     public func shutdownHandler() -> @Sendable () -> Void {
@@ -134,7 +138,7 @@ public final class Scheduler {
     private func reconcile(at now: Date) throws -> RunRecord? {
         let tasks = try store.listTasks()
         for task in tasks {
-            if shutdown.isRequested { return nil }
+            if try shutdown.isRequested || store.schedulerPaused() { return nil }
             if task.isPaused {
                 try record(.scheduleChecked, "Schedule skipped because the task is paused.", taskID: task.id)
             } else {
@@ -146,7 +150,7 @@ public final class Scheduler {
         }
 
         taskLoop: for task in tasks where !task.isPaused {
-            if shutdown.isRequested { return nil }
+            if try shutdown.isRequested || store.schedulerPaused() { return nil }
             let runs = try store.listRuns(taskID: task.id)
             let pending = runs
                 .filter { $0.state == .pending }
@@ -162,26 +166,31 @@ public final class Scheduler {
             }
 
             if let next = run.nextCheckAt, next > now { continue }
+            var observations: [ReadinessObservation] = []
             for check in task.readinessChecks ?? [] {
+                if try store.schedulerPaused() { return nil }
                 guard try shutdown.admit({
                     try record(.checkStarted, "Checking \(check.provider.description).", taskID: task.id, runID: run.id)
                     return true
                 }) == true else { return nil }
                 let result = readinessRunner(check, task.command)
+                observations.append(ReadinessObservation(checkID: check.id, status: result.status,
+                    message: result.message, checkedAt: now))
                 if result.status != .ready {
                     let failures = min(run.consecutiveCheckFailures ?? 0, 4)
                     let delay: TimeInterval = result.status == .actionRequired ? 300 : min(900, 60 * pow(2, Double(failures)))
                     try store.recordCheckBlocker(runID: run.id, reason: result.message,
-                        status: result.status, checkedAt: now, nextCheckAt: now.addingTimeInterval(delay), expectedTask: task)
+                        status: result.status, checkedAt: now, nextCheckAt: now.addingTimeInterval(delay), expectedTask: task, observations: observations)
                     try record(result.status == .checkError ? .checkFailed : .checkBlocked,
                         "\(result.status.displayName): \(result.message)",
-                        level: result.status == .checkError ? .error : .warning, taskID: task.id, runID: run.id)
+                        level: result.status == .checkError ? .error : .info, taskID: task.id, runID: run.id)
                     continue taskLoop
                 }
                 try record(.checkPassed, result.message, taskID: task.id, runID: run.id)
             }
 
             if let check = task.check {
+                if try store.schedulerPaused() { return nil }
                 guard try shutdown.admit({
                     try record(.checkStarted, "Running the readiness check.", taskID: task.id, runID: run.id)
                     return true
@@ -194,7 +203,7 @@ public final class Scheduler {
                         outputLimitBytes: 0
                     )
                 } catch {
-                    try store.recordCheckBlocker(runID: run.id, reason: "Prerequisite check could not start: \(error.localizedDescription)", status: .checkError, expectedTask: task)
+                    try store.recordCheckBlocker(runID: run.id, reason: "Prerequisite check could not start: \(error.localizedDescription)", status: .checkError, expectedTask: task, observations: observations)
                     try record(.checkFailed, "Readiness check could not start: \(error.localizedDescription)",
                         level: .error, taskID: task.id, runID: run.id)
                     continue
@@ -204,7 +213,7 @@ public final class Scheduler {
                         ? "Prerequisite check timed out."
                         : (check.failureMessages?[String(result.exitCode)] ?? "Prerequisite check returned exit code \(result.exitCode).")
                     try store.recordCheckBlocker(runID: run.id, reason: reason,
-                        status: result.exitCode == 1 && !result.timedOut ? .waiting : .checkError, expectedTask: task)
+                        status: result.exitCode == 1 && !result.timedOut ? .waiting : .checkError, expectedTask: task, observations: observations)
                     try record(result.timedOut || result.exitCode != 1 ? .checkFailed : .checkBlocked,
                         reason, level: result.timedOut || result.exitCode != 1 ? .error : .warning,
                         taskID: task.id, runID: run.id)
@@ -215,11 +224,12 @@ public final class Scheduler {
                 try record(.eligibilityChecked, "No readiness check is configured; work is eligible for launch.", taskID: task.id, runID: run.id)
             }
 
-            if shutdown.isRequested { return nil }
+            if try shutdown.isRequested || store.schedulerPaused() { return nil }
             guard var claimed = try shutdown.admit({ try store.claimPendingRun(id: run.id, at: Date(), expectedTask: task) }) ?? nil else {
                 try record(.runHeld, "Launch skipped; this run is no longer eligible to claim.", taskID: task.id, runID: run.id)
                 continue
             }
+            claimed.readinessObservations = observations
             claimed.blockerReason = nil
             claimed.state = .running
             claimed.startedAt = Date()
@@ -235,13 +245,31 @@ public final class Scheduler {
                 if command.environment["PYTHONUNBUFFERED"] == nil {
                     command.environment["PYTHONUNBUFFERED"] = "1"
                 }
-                let result = try CommandRunner.run(command, timeoutSeconds: 3_600, logFiles: logs)
+                let runID = claimed.id
+                let result = try CommandRunner.run(command, timeoutSeconds: 3_600, logFiles: logs,
+                    shouldStop: { (try? self.store.run(id: runID)?.stopRequestedAt) != nil },
+                    onWake: {
+                        let wake = Date()
+                        try? self.store.recordWake(runID: runID, at: wake)
+                        try? self.record(.runResumed, "Mac woke during execution. Monitoring progress; the run time limit includes sleep.", taskID: task.id, runID: runID)
+                    })
+                if let latest = try store.run(id: runID) {
+                    claimed.lastWakeAt = latest.lastWakeAt
+                    claimed.stopRequestedAt = latest.stopRequestedAt
+                }
                 claimed.exitCode = result.exitCode
                 claimed.standardOutput = result.standardOutput
                 claimed.standardError = result.standardError
                 claimed.finishedAt = Date()
                 claimed.state = result.exitCode == 0 && !result.timedOut ? .succeeded : .failed
-                if result.timedOut { claimed.blockerReason = "Command timed out." }
+                switch result.stopReason {
+                case .timeout: claimed.blockerReason = "Command exceeded its one-hour time limit."
+                case .timeoutAfterSleep: claimed.blockerReason = "Command exceeded its one-hour time limit across sleep. Local processes were stopped; review output before requesting a retry."
+                case .cancelled:
+                    claimed.state = .cancelled
+                    claimed.blockerReason = "Stopped at your request. Review output before requesting a retry."
+                case nil: break
+                }
             } catch {
                 claimed.finishedAt = Date()
                 claimed.state = .failed
