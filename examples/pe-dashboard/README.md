@@ -41,11 +41,15 @@ cd ~/pe-dashboard
   ~/run-eventually/examples/pe-dashboard/check.py --project-dir "$PWD" --adc-only
 ```
 
-Standard checks show Waiting, Action required, or Check error. The remaining
+The CLI retains Ready, Waiting, Action required, and Check error categories;
+the app shows neutral Waiting and check pills, with instructions in Waiting details. The remaining
 custom check displays safe blocker messages for 13 (ADC) and 14 (Python ADC).
 Raw auth output is discarded. Update an existing task's checks with
 `configure-check.sh TASK_ID`; adding an equivalent standard check reuses its ID.
-The task's current enabled/paused state is preserved. Checks remain bounded.
+The script preserves the task's enabled/paused setting but does not pause it
+while attaching checks. Pause the task first for a live migration, attach
+replacements before removing old checks, then restore its original pause state.
+Checks remain bounded.
 
 For Google authorization, sign in explicitly in Terminal:
 
@@ -54,6 +58,13 @@ gcloud auth login
 cd ~/pe-dashboard
 make auth
 ```
+
+The referenced pipeline checks ADC with `print-access-token`; its "Run: make
+auth" output is advice on failure, not an invocation of that target. A successful
+check does not prevent session expiry during a longer run. Both dashboard examples
+use default ADC unless their execution context overrides it. See the skill's
+[Google renewal guidance](../../skills/run-eventually/references/readiness.md#google-credential-renewal)
+for shared CLI/ADC sign-in and credential-scope considerations.
 
 For SSH, connect and renew work SSH credentials using the normal company process.
 Test `ssh -o BatchMode=yes 10.248.22.135 true` afterward. Approve a first-time host

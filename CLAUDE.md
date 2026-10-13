@@ -23,21 +23,25 @@ assume all of it is implemented.
 
 The intended architecture has one per-user LaunchAgent scheduler, with the UI and
 a local MCP adapter communicating through a shared API over XPC. Startup
-registration through SMAppService, XPC, MCP, UI editing, and browser-assisted
+registration through SMAppService, XPC, MCP, general command/schedule editing, and browser-assisted
 authentication are not implemented yet. The prototype CLI writes task definitions
-directly to SQLite; the desktop reads it and transactionally queues manual runs.
+directly to SQLite; the desktop reads it and transactionally queues manual runs,
+changes task/global pause preferences, and requests an active-run stop.
 Only the scheduler launches commands. Keep scheduling authority centralized
 when introducing the service.
 
-Standard network/VPN, SSH, and BigQuery providers are configured with `add-check`.
+Standard network/VPN, SSH, Smallstep certificate, and BigQuery providers are configured with `add-check`.
 All standard checks and the legacy custom check must pass before launch. Provider
-results distinguish Waiting, Action required, and Check error; raw probe output
+results distinguish Waiting, Action required, and Check error. The app presents
+sign-in delays as neutral Waiting; per-check observations on pending runs support
+pills without inferring success for unvisited checks. Raw probe output
 must never enter Activity or run logs. Standard checks inherit the task context,
 back off on failure, and can be rechecked without queuing a new run. Readiness
 concerns environmental availability; assume the task already works manually.
 
-`examples/pe-dashboard` provides a composite readiness check and a daily pipeline
-configuration. `scripts/install-dev-agent.sh` is a temporary per-user LaunchAgent
+`examples/pe-dashboard` provides standard checks plus an ADC-only custom check
+and a daily pipeline configuration. Its original composite mode remains for older
+definitions; do not reintroduce SSH polling for Smallstep-managed hosts. `scripts/install-dev-agent.sh` is a temporary per-user LaunchAgent
 bridge for development; it is not the planned bundled SMAppService integration.
 Run the example's Python unit tests when changing its readiness checks.
 
@@ -52,7 +56,10 @@ workflow graph in this app. General interactive terminal sessions are deferred.
   and last due times and occurrence count.
 - Persist cursor advancement and due work in one transaction.
 - Never overlap executions of the same task. Only one scheduler owns a database.
-- Preserve the schedule cursor while paused so resuming catches up.
+- Preserve the schedule cursor while paused so resuming catches up. Global pause
+  is persisted separately from task pause; resuming globally preserves task pauses.
+  Revalidate global pause inside the transactional claim, including when a pause
+  arrives during a readiness probe. Pause lets running commands finish.
 - New daily schedules start at creation; explicitly overdue one-time tasks run
   on the next reconciliation.
 - Daily schedules use fixed IANA time zones. Repeated local times run once at
@@ -64,9 +71,12 @@ workflow graph in this app. General interactive terminal sessions are deferred.
 - Display due, started, and finished timestamps with clear labels and time zones.
 
 Current limitations: one execution worker, minute polling, one custom check per
-task, complete stdout/stderr files with bounded legacy previews in SQLite, and timeout termination of the parent
-process only. Process-group termination and reliable recovery of spawned children
-still need work. Browser sign-in must eventually be user initiated, with credential
+task, and complete stdout/stderr files with bounded legacy previews in SQLite.
+The one-hour execution timeout uses continuous elapsed time including sleep.
+Stop/timeout signals a verified isolated local process group with a one-second
+cleanup period, then forces remaining group members to exit. Unverified groups
+fall back to stopping the parent; detached descendants and remote work are not
+covered. This is not restart-safe reconciliation of arbitrary external effects. Browser sign-in must eventually be user initiated, with credential
 readiness rechecked afterward; do not automatically launch browsers from polling.
 
 ## Build and verify
@@ -95,7 +105,9 @@ Prefer `scripts/dev.sh` for iterative development: it builds and updates the
 development LaunchAgent and preview window together, verifies the running helper
 digest, and waits for active work to drain. SIGTERM/SIGINT stop new admissions and
 wake idle waits; already admitted operations finish before the scheduler exits.
-Do not replace this with `launchctl kickstart -k` or terminate active task children.
+Do not replace this with `launchctl kickstart -k` or stop active task children as
+part of a development upgrade. An explicitly requested Stop run is a separate
+operation handled by the scheduler; it must not automatically retry remote work.
 Legacy helpers require an idle-only first upgrade. `scripts/test-dev-restart.py`
 tests subprocess shutdown and restart safety; `--launchd` opts into temporary
 LaunchAgent tests, using an isolated label and database.

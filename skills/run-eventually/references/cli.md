@@ -86,11 +86,15 @@ For one task's run status, query `runs` by `task_id` with a bound parameter,
 selecting only `id` and `state` when logs are unnecessary. JSON date fields use
 Swift's reference date (2001-01-01 UTC), not Unix time.
 
+For global pause, app-only Stop run, sleep accounting, build compatibility, and
+retry decisions, read [operations.md](operations.md). These app capabilities do
+not add CLI commands.
+
 ## Limits
 
 - Only one-time and daily schedules are implemented. There is no weekly/cron,
-  task deletion, general command/schedule editing, cancellation command, or
-  unknown-outcome resolution command. Pause disables future launches; it neither
+  task deletion, general command/schedule editing, global-pause command,
+  cancellation command, or unknown-outcome resolution command. Pause disables future launches; it neither
   deletes a task nor stops running work.
 - Idempotency keys and revision checks are not implemented. Inspect after an
   uncertain creation result before retrying; do not promise duplicate prevention.

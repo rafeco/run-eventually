@@ -8,9 +8,9 @@ including after sleep or downtime.
 See the [design document](docs/design.md) for the proposed architecture, scheduling
 behavior, user-assisted authentication, and implementation milestones.
 
-The first working slice has a persistent command scheduler, one-time and daily
-schedules, custom prerequisite commands, a command-line interface, and a
-SwiftUI status window with a Run now button. It catches up after the scheduler starts again and combines
+The current preview has a persistent command scheduler, one-time and daily
+schedules, standard and custom readiness checks, a command-line interface, and a
+SwiftUI task list with Run now, pause controls, Stop run, history, and live logs. It catches up after the scheduler starts again and combines
 missed daily occurrences into one pending run. It conservatively holds a run for
 review if the scheduler stops during command execution.
 
@@ -30,8 +30,7 @@ scripts/dev.sh
 This builds first, updates the development LaunchAgent's helper, and restarts the
 preview window after verifying the new scheduler's running build. It installs the
 development LaunchAgent on first use. Keep using this command after code changes
-so the window and background scheduler stay together. The Activity window warns
-when their builds differ.
+so the window and background scheduler stay together. The Tasks status bar and Activity window show when their builds differ.
 
 The scheduler handles SIGTERM and SIGINT by finishing its current command or
 readiness check, recording the result, and exiting without admitting more work.
@@ -79,9 +78,10 @@ The [executive metrics dashboard example](examples/exec-metrics-dashboard/README
 runs ETL locally, uploads a validated SQLite snapshot to the VM, and restarts
 the dashboard in tmux without Google authorization on the VM.
 
-This is a development preview. Bundled startup registration, task editing in the app,
-browser-assisted sign-in, MCP, and signed
-distribution are still to be built.
+This is a development preview. Bundled startup registration, general command and
+schedule editing in the app, browser-assisted sign-in, MCP, and signed
+distribution are still to be built. Per-task/global pause and active-run stopping
+are available in the app; global pause and cancellation have no CLI command.
 
 ## Standard readiness checks
 
@@ -136,6 +136,39 @@ action; uncertain failures are not diagnosed as expired credentials.
 Assume the task already runs manually. Readiness checks concern changing network
 and credential availability, not application setup or API keys in `.env`.
 
+## Pause and interrupted runs
+
+Use **Pause task** on a task row to hold that task until **Resume task** is chosen.
+Use **Pause all** in the Tasks status bar to pause scheduling globally until
+**Resume all** is chosen. These preferences survive app/service restarts; a global
+resume does not unpause individually paused tasks. Existing commands finish
+normally. Resume checks queued and missed work on the next scheduler scan.
+
+The status bar also shows when the scheduler is stopped, draining for a restart,
+or running a different build. A build mismatch alone does not imply that an
+otherwise running scheduler has paused. Older services advertise their capabilities;
+a requested global pause takes effect when the updated service starts.
+
+Task deadlines use a continuous clock: the one-hour run limit includes laptop
+sleep. Waking is recorded in Activity and run details. After two minutes without
+new output following a wake, the app shows a quiet-progress notice. Quiet output
+alone does not prove a stalled command and does not trigger an automatic retry.
+
+**Stop run** asks the scheduler to signal the command's verified, isolated local
+process group, allowing one second of cleanup before forcing remaining local
+processes to exit. If process-group isolation cannot be verified, only the parent
+is signaled; detached processes are not covered. The run becomes **Cancelled**
+and keeps its logs and reason.
+Timeouts are **Failed**, with a specific explanation if sleep crossed the deadline.
+Remote jobs can continue after local processes stop; inspect output before using
+**Run now** to retry. Neither cancellation nor a timeout automatically reruns a
+command. The new stop control requires an updated scheduler.
+
+Check pills appear in the sidebar only while work is pending. Filled backgrounds
+use white text for ready/failed states and dark text for neutral waiting states.
+Failed or cancelled runs show a red reason pill; absent reasons are reported as
+unrecorded instead of inferred from arbitrary command output.
+
 ## Watching activity
 
 The task list opens at launch and when you click the app in the Dock. Use
@@ -180,40 +213,11 @@ MCP support is planned; the skill works without it.
 To install from this checkout, copy `skills/run-eventually` into your personal
 Codex skills directory (`$CODEX_HOME/skills`, or `~/.codex/skills` by default).
 Preserve any existing skill with that name rather than blindly overwriting it.
-The installed skill is available on the next turn. Invoke it as `$run-eventually`
+The installed skill is available on the next turn. Copies installed in other
+agent environments must be refreshed separately after this repo's skill changes;
+a scheduler rebuild does not update those copies. Invoke it as `$run-eventually`
 or ask, “Use Run Eventually to run this project's FX refresh every morning at
 7 Eastern.”
 
 If the executable is outside the usual app or development locations, provide its
 absolute path in the session or set `RUN_EVENTUALLY_CLI` for skill discovery.
-
-### Pause and interrupted runs
-
-Use **Pause task** on a task row to hold that task until **Resume task** is chosen.
-Use **Pause all** in the Tasks status bar to pause scheduling globally until
-**Resume all** is chosen. These preferences survive app/service restarts; a global
-resume does not unpause individually paused tasks. Existing commands finish
-normally. Resume checks queued and missed work on the next scheduler scan.
-
-The status bar also shows when the scheduler is stopped, draining for a restart,
-or running a different build. A build mismatch alone does not imply that an
-otherwise running scheduler has paused. Older services advertise their capabilities;
-a requested global pause takes effect when the updated service starts.
-
-Task deadlines use a continuous clock: the one-hour run limit includes laptop
-sleep. Waking is recorded in Activity and run details. After two minutes without
-new output following a wake, the app shows a quiet-progress notice. Quiet output
-alone does not prove a stalled command and does not trigger an automatic retry.
-
-**Stop run** asks the scheduler to signal the command's verified, isolated local
-process group, allowing one second of cleanup before forcing remaining local
-processes to exit. The run becomes **Cancelled** and keeps its logs and reason.
-Timeouts are **Failed**, with a specific explanation if sleep crossed the deadline.
-Remote jobs can continue after local processes stop; inspect output before using
-**Run now** to retry. Neither cancellation nor a timeout automatically reruns a
-command. The new stop control requires an updated scheduler.
-
-Check pills appear in the sidebar only while work is pending. Filled backgrounds
-use white text for ready/failed states and dark text for neutral waiting states.
-Failed or cancelled runs show a red reason pill; absent reasons are reported as
-unrecorded instead of inferred from arbitrary command output.

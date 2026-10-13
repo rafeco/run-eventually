@@ -1,14 +1,54 @@
 # Run Eventually design
 
-Status: Initial design for implementation planning
+Status: Working design; current preview status updated October 13, 2026
 
 Date: October 3, 2026
 
 Run Eventually is a macOS app for scheduled commands that may need to wait for usable credentials, a VPN, or other conditions. A scheduled time establishes when work becomes due. The app retains that work and starts it when its prerequisites are satisfied, including after the laptop wakes or the user logs in following a shutdown.
 
-The initial architecture uses Swift throughout: a SwiftUI interface, a separate background scheduler, and a local MCP adapter. All three ship in one app bundle. The scheduler persists outstanding work and execution history in SQLite so that its correctness does not depend on a timer firing or the interface remaining open.
+The target architecture uses Swift throughout: a SwiftUI interface, a separate background scheduler, and a local MCP adapter. All three are intended to ship in one app bundle. The scheduler persists outstanding work and execution history in SQLite so that its correctness does not depend on a timer firing or the interface remaining open.
 
 This document records the agreed product scope and proposes implementation defaults. Defaults identified below should be validated during the first implementation milestone.
+
+## Implemented preview and remaining roadmap
+
+The release architecture below includes proposed behavior. The current preview
+uses a shared Swift package and SQLite directly from the CLI and UI, plus one
+LaunchAgent scheduler that alone launches commands. XPC, MCP, SMAppService,
+shared named prerequisites, automatic retries, and browser-assisted authentication
+remain planned. The preview has one execution worker, one-time/daily schedules,
+and an optional custom check plus per-task Network, SSH, Smallstep certificate,
+and BigQuery providers.
+
+Implemented controls include Run now, Recheck, per-task Pause/Resume, persistent
+Pause all/Resume all, and Stop run. Pause prevents new scheduling/launches and
+preserves catch-up; it does not terminate running work. Global resume does not
+change individually paused tasks. Global pause and active-run cancellation are
+app controls, without CLI commands. Capability flags and executable digests
+identify an older service during development updates.
+
+The sidebar's Later Today status describes a future occurrence in the schedule's
+zone, not a durable pending run or yesterday's success. Pending work shows neutral
+Waiting with check pills, not repeated sign-in alerts. Per-check results are
+saved for the current scan; later checks skipped after a blocker show Not checked.
+Running older records without individual results can indicate checks passed at
+launch, but this is not a live recheck. Failure/cancellation explanations remain
+separate from normal waiting and from the last successful run.
+
+Execution has a fixed one-hour continuous-time deadline including sleep. Clock
+sampling detects sleep during active commands, records waking, and checks the
+deadline on resume. A quiet-after-wake notice after two minutes without new output
+is informational, not proof of a hang. Stop/timeout allows one second of cleanup
+for the verified isolated local process group before forcing remaining members
+to exit; unverified isolation falls back to parent-only termination. Detached
+children and remote jobs are not reconciled. Stop records Cancelled, deadline
+expiry records Failed, and neither automatically retries. Interrupted scheduler
+ownership still yields Outcome unknown and requires review; UI/CLI resolution
+of that unknown state is not implemented.
+
+The design's attempt/revision records, configurable deadlines, event-driven
+reconciliation, assisted-resolution sessions, and cancellation of unstarted work
+are future behavior. See [README](../README.md) for current operations and limits.
 
 ## Product scope
 
@@ -26,7 +66,7 @@ Each task is one executable unit. Its creator handles sequencing through a Make 
 
 General interactive terminal sessions, remote execution, Linux support, and replaying every missed recurrence are deferred. The app does not promise execution while the Mac is asleep, powered off, or before the user logs in. It catches up when execution becomes possible.
 
-## Architecture
+## Architecture (target)
 
 ```mermaid
 flowchart TD
@@ -50,7 +90,7 @@ flowchart TD
 | Shared Swift package | Task models, schedule rules, state transitions, API messages, and testable scheduling logic. |
 | macOS integration layer | Service registration, wake and network observation, process management, notifications, and local IPC. |
 
-The background scheduler is the sole writer of scheduling state and the sole authority for starting commands. Neither the interface nor an MCP connection creates an independent scheduler. Multiple clients can connect at once, and disconnecting a client does not cancel accepted scheduled work.
+In the target architecture, the background scheduler is the sole writer of scheduling state and the sole authority for starting commands. Neither the interface nor an MCP connection creates an independent scheduler. Multiple clients can connect at once, and disconnecting a client does not cancel accepted scheduled work.
 
 The scheduler runs as a per-user LaunchAgent managed by `launchd`. The app registers its bundled helper through `SMAppService` and displays the actual registration and approval state. Apple provides this registration model on macOS 13 and later; the deployment target remains an implementation decision. [Apple service management](https://developer.apple.com/documentation/servicemanagement/smappservice)
 
@@ -125,11 +165,12 @@ Support one-time timestamps and calendar recurrence, with a human-readable daily
 
 Persist a named time zone, defaulting to the Mac's zone at creation, plus calculated UTC due times. Proposed v1 behavior keeps that zone fixed when the user travels. For daylight-saving transitions, run a repeated local time once and move a nonexistent local time to the first valid instant after the gap. Display upcoming occurrences so these choices are visible.
 
-Persisted occurrence identity and cursor updates prevent a backward clock adjustment from creating duplicate work. A forward clock change invokes ordinary catch-up. Use elapsed-time measurements for active execution timeouts rather than calendar timestamps; sleep accounting for those timeouts must be specified and tested in the first milestone.
+Persisted occurrence identity and cursor updates prevent a backward clock adjustment from creating duplicate work. A forward clock change invokes ordinary catch-up. Use elapsed-time measurements for active execution timeouts rather than calendar timestamps; the preview includes sleep using a continuous clock, with simulated-sleep tests. Installed-device wake behavior remains an integration-testing concern.
 
 ## Prerequisites
 
-The current preview implements per-task network/VPN TCP, SSH, and BigQuery
+The current preview implements per-task network/VPN TCP, SSH, Smallstep user
+certificate inspection from the local SSH agent, and BigQuery
 metadata checks through `add-check`, in addition to the legacy custom command.
 All attached conditions must pass. Structured blockers and bounded timer backoff
 are implemented, with Recheck in the app and CLI. Shared named configurations,

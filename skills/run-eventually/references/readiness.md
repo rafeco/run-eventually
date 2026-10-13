@@ -66,8 +66,8 @@ credential source merely because it is installed on the Mac.
 "$cli" check-now "$task_id"
 ```
 
-Replace the sample targets with the task's actual dependencies; do not attach all
-three automatically. `vpn` is an alias for `network`, not detection of a VPN app.
+Replace the sample targets with the task's actual dependencies; do not attach
+every provider automatically. `vpn` is an alias for `network`, not detection of a VPN app.
 Network, SSH, and Smallstep default to 10 seconds; BigQuery defaults to 30. Override with
 `--timeout-seconds N` (positive, at most 120 seconds).
 
@@ -86,9 +86,36 @@ next scan, without creating a new run. The app offers the same Recheck action.
 
 Waiting and inconclusive standard checks retry after 1, 2, 4, 8, then at most 15
 minutes. Action required rechecks every 5 minutes to discover external fixes.
-Check edits invalidate backoff. The app and Activity show the blocker category.
+Check edits invalidate backoff. The CLI and Activity retain the blocker category;
+the app presents ordinary blockers as neutral Waiting with collapsed details.
+Per-check pills reflect the current scan; later checks skipped after a blocker
+remain Not checked. These results do not promise continued credential validity.
 
 Use one custom check only for an environmental condition not covered by the
 providers, such as the ADC credential source a Python task actually uses. Custom
 exit 0 means ready, exit 1 means waiting, and other exits or timeout mean check
 error; the scheduler cannot infer action required from a legacy exit code alone.
+
+## Google credential renewal
+
+Google CLI credentials (`gcloud`/`bq`) and Python ADC are distinct, even when they
+use the same account. Match the task's credential source, including configured
+paths and project overrides. A CLI token check alone does not prove Python ADC
+can refresh. The existing dashboard examples retain a Python ADC refresh check
+for this reason; the BigQuery provider checks the `bq` credential context.
+
+For a user who wants to renew both default sources, `gcloud auth login --update-adc
+--force` writes CLI credentials to ADC too. It overwrites the existing default ADC
+configuration; preserve task-specific account, scopes (including Drive access),
+and impersonation requirements rather than prescribing it for every task.
+Use the user's existing explicit login process for separate credential profiles.
+Login is user initiated, never part of polling or an automatic failed-run retry.
+[Google CLI login](https://docs.cloud.google.com/sdk/gcloud/reference/auth/login)
+
+Readiness can pass and authentication can subsequently require renewal. Google
+Workspace session controls can expire local ADC independently of a task finishing.
+Compare check times and exact safe error categories before attributing that loss
+to a preceding job. An error suggesting `make auth` is not evidence that the job
+executed that target. Inspect the actual command chain; do not capture credential
+values or raw authentication responses as evidence.
+[Google reauthentication](https://docs.cloud.google.com/docs/authentication/reauthentication)

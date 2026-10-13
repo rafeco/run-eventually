@@ -35,8 +35,10 @@ use the host behind the SSH alias, not the alias itself. Run
 by Run Eventually. The existing scheduler LaunchAgent must remain running.
 
 The scheduler allows one hour per run and does not automatically retry failed
-or ambiguous runs. Only the parent is terminated on timeout; inspect lingering
-ETL/upload processes before rerunning. The 1.9 GB database requires temporary
+or ambiguous runs. The one-hour deadline includes sleep; timeout or Stop run
+terminates the verified local process group with a brief cleanup period. This does
+not cancel BigQuery jobs or reverse uploads/remote changes. Inspect remote work
+and the saved logs before requesting another run. The 1.9 GB database requires temporary
 space locally and space for staging plus the previous DB on the VM. An interrupted
 upload can leave `.metrics-*.db` files on the VM. The app log needs manual retention.
 This procedure is not a multi-writer database deployment; don't run VM ETL at the

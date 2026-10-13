@@ -91,10 +91,14 @@ unverified when it cannot be established. Do not start another `serve` or use
 Installing login startup is a separate operation.
 
 For authorized immediate execution, use `run-now` and inspect status. Queuing does
-not prove success. Pause does not stop an already running process. Failed runs
-are not silently retried; unknown outcomes require review before another run.
+not prove success. Read [references/operations.md](references/operations.md) when
+inspecting UI statuses, pause state, sleep, cancellation, or retries. The app's
+global pause can hold an enabled task; do not override an intentional pause.
+Pause does not stop an already running process. Failed runs are not silently
+retried; unknown outcomes require review before another run.
 
 Report name and ID, command and directory, schedule with zone, checks,
-enabled/paused state, and blockers or unverified scheduler health. Distinguish
+enabled/paused state (including global pause when observable), and blockers or
+unverified scheduler health. Distinguish
 saved, queued, running, and succeeded. Explain catch-up when relevant: missed
 daily occurrences coalesce into one pending run rather than replaying every day.
