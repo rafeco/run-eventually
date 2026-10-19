@@ -87,7 +87,10 @@ next scan, without creating a new run. The app offers the same Recheck action.
 Waiting and inconclusive standard checks retry after 1, 2, 4, 8, then at most 15
 minutes. Action required rechecks every 5 minutes to discover external fixes.
 Check edits invalidate backoff. The CLI and Activity retain the blocker category;
-the app presents ordinary blockers as neutral Waiting with collapsed details.
+the app labels pending work Queued, with Waiting on individual check pills and
+collapsed blocker details. The status pill shows a compact next-check countdown;
+Queued work details show the full attempt time. This is not a promise that task
+execution will start then.
 Per-check pills reflect the current scan; later checks skipped after a blocker
 remain Not checked. These results do not promise continued credential validity.
 

@@ -99,16 +99,20 @@ private func runTimeLabel(_ run: RunRecord) -> String {
 private struct TaskSummary: Identifiable, Sendable {
     let task: TaskDefinition
     let runs: [RunRecord]
-    var quietAfterWake = false
+    var progress: ExecutionProgress?
+    var pendingExplanation: String?
+    var waitingForWorker = false
+    var nextScanAt: Date?
+    var nextAttemptHold: String?
 
     var id: UUID { task.id }
     var pendingRuns: [RunRecord] { runs.filter { $0.state == .pending } }
     var pending: RunRecord? { pendingRuns.last }
     var pendingText: String {
         switch pendingRuns.count {
-        case 0: "No pending run"
-        case 1: "1 pending run"
-        default: "\(pendingRuns.count) pending runs"
+        case 0: "No queued runs"
+        case 1: "1 queued run"
+        default: "\(pendingRuns.count) queued runs"
         }
     }
     var workingDirectoryText: String {
@@ -142,13 +146,51 @@ private struct TaskSummary: Identifiable, Sendable {
 
     var status: String {
         if task.isPaused { return "Paused" }
-        if let active { return active.state == .starting ? "Starting" : "Running" }
+        if let active {
+            switch progress?.phase {
+            case .stopping: return "Stopping"
+            case .possiblyStalled: return "Possibly stalled"
+            case .quiet: return "Running · Quiet"
+            default: return active.state == .starting ? "Starting" : "Running"
+            }
+        }
         if lastResult?.state == .outcomeUnknown { return "Needs review" }
-        if let pending { return pending.blockerReason == nil ? "Pending" : "Waiting" }
+        if pending != nil { return "Queued" }
         if isLaterToday { return "Later Today" }
         if scheduleIsDue { return "Due" }
         if let lastResult { return lastResult.state.displayName }
         return "Scheduled"
+    }
+
+    var nextAttemptDescription: String {
+        if let hold = nextAttemptHold { return "Next readiness check: " + hold }
+        guard let pending else { return "No run is queued." }
+        let next = [pending.nextCheckAt, nextScanAt].compactMap { $0 }.max()
+        guard let next else { return "Next readiness check: on the next scheduler scan." }
+        let remaining = next.timeIntervalSinceNow
+        guard remaining > 0 else { return "Readiness check is due now; waiting for the next scheduler scan." }
+        let countdown = remaining < 60 ? "in \(max(1, Int(ceil(remaining))))s"
+            : "in about \(Int(ceil(remaining / 60)))m"
+        return "Next readiness check: at or after \(timestamp(next, seconds: true)) (\(countdown))."
+    }
+
+    var statusCountdown: String? {
+        guard !task.isPaused, active == nil, lastResult?.state != .outcomeUnknown else { return nil }
+        let target: Date?
+        if let pending {
+            guard nextAttemptHold == nil else { return nil }
+            target = [pending.nextCheckAt, nextScanAt].compactMap { $0 }.max()
+        } else if isLaterToday || status == "Scheduled" {
+            target = nextScheduledAt
+        } else { return nil }
+        guard let target else { return nil }
+        let seconds = target.timeIntervalSinceNow
+        guard seconds > 0 else { return nil }
+        if seconds < 60 { return "< 1m" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)m" }
+        let remainder = minutes % 60
+        return "\(minutes / 60)h" + (remainder == 0 ? "" : " \(remainder)m")
     }
 
     var statusColor: Color {
@@ -248,12 +290,40 @@ private func readDashboard(at path: String, bundledDigest: String?) throws -> Da
     }
     let summaries = tasks.map { task in
         var summary = TaskSummary(task: task, runs: runsByTask[task.id] ?? [])
-        if let active = summary.active, let wake = active.lastWakeAt, Date().timeIntervalSince(wake) > 120 {
-            let latestOutput = [active.standardOutputPath, active.standardErrorPath].compactMap { path -> Date? in
-                guard let path, let attributes = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+        summary.nextScanAt = latest?.nextCheckAt
+        if summary.pending != nil {
+            if task.isPaused {
+                summary.pendingExplanation = "Queued · Task paused"
+                summary.nextAttemptHold = "after this task is resumed."
+            } else if paused {
+                summary.pendingExplanation = "Queued · All scheduling paused"
+                summary.nextAttemptHold = "after scheduling is resumed."
+            } else if !running {
+                summary.pendingExplanation = "Queued · Scheduler stopped"
+                summary.nextAttemptHold = "after the scheduler starts."
+            } else if latest?.kind == .schedulerStopping {
+                summary.pendingExplanation = "Queued · Scheduler restarting"
+                summary.nextAttemptHold = "after the scheduler restarts."
+            } else if summary.lastResult?.state == .outcomeUnknown {
+                summary.pendingExplanation = "Queued · Previous outcome needs review"
+                summary.nextAttemptHold = "after the previous run's unknown outcome is resolved."
+            }
+            else if runsByTask.values.joined().contains(where: { $0.state == .starting || $0.state == .running }) {
+                summary.pendingExplanation = "Queued · Waiting for the running task to finish"
+                summary.waitingForWorker = true
+                summary.nextAttemptHold = "after the running task finishes (time not yet known)."
+            } else {
+                summary.pendingExplanation = summary.pending?.blockerReason == nil
+                    ? "Queued for the next scan" : "Queued · Waiting for readiness"
+            }
+        }
+        if let active = summary.active {
+            let lastOutput = [active.standardOutputPath, active.standardErrorPath].compactMap { path -> Date? in
+                guard let path, let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+                      let size = attributes[.size] as? NSNumber, size.intValue > 0 else { return nil }
                 return attributes[.modificationDate] as? Date
             }.max()
-            summary.quietAfterWake = latestOutput.map { $0 <= wake } ?? true
+            summary.progress = ExecutionProgress.assess(run: active, lastOutputAt: lastOutput, now: Date())
         }
         return summary
     }
@@ -374,7 +444,7 @@ private struct DashboardView: View {
                 HStack(spacing: 16) {
                     let pendingCount = model.summaries.reduce(0) { $0 + $1.pendingRuns.count }
                     Label(
-                        pendingCount == 0 ? "No pending runs" : "\(pendingCount) pending \(pendingCount == 1 ? "run" : "runs")",
+                        pendingCount == 0 ? "No queued runs" : "\(pendingCount) queued \(pendingCount == 1 ? "run" : "runs")",
                         systemImage: "clock"
                     )
                     let runningCount = model.summaries.filter { $0.active != nil }.count
@@ -468,7 +538,8 @@ private struct DashboardView: View {
 
 private enum PillColors {
     static let ready = Color(red: 0.08, green: 0.42, blue: 0.26)
-    static let failed = Color(red: 0.70, green: 0.15, blue: 0.12)
+    static let failed = Color(red: 0.96, green: 0.88, blue: 0.89)
+    static let failedText = Color(red: 0.43, green: 0.18, blue: 0.23)
     static let active = Color(red: 0.09, green: 0.36, blue: 0.83)
     static let neutral = Color(red: 0.90, green: 0.91, blue: 0.93)
     static let neutralText = Color(red: 0.12, green: 0.16, blue: 0.22)
@@ -480,21 +551,35 @@ private struct JobStatusBadge: View {
     private var background: Color {
         if summary.statusColor == .red { return PillColors.failed }
         if summary.statusColor == .green { return PillColors.ready }
-        if summary.active != nil && !summary.task.isPaused { return PillColors.active }
+        if summary.active != nil && !summary.task.isPaused
+            && summary.progress?.phase != .possiblyStalled && summary.progress?.phase != .quiet { return PillColors.active }
         return PillColors.neutral
     }
     private var foreground: Color {
-        summary.statusColor == .red || summary.statusColor == .green
-            || (summary.active != nil && !summary.task.isPaused) ? .white : PillColors.neutralText
+        if summary.statusColor == .red { return PillColors.failedText }
+        if summary.statusColor == .green { return .white }
+        if summary.active != nil && !summary.task.isPaused
+            && summary.progress?.phase != .possiblyStalled && summary.progress?.phase != .quiet { return .white }
+        return PillColors.neutralText
     }
     var body: some View {
-        Label(summary.status, systemImage: summary.statusIcon)
-            .font(.caption)
-            .foregroundStyle(foreground)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(background, in: Capsule())
-            .accessibilityElement(children: .combine)
+        HStack(spacing: 5) {
+            Image(systemName: summary.statusIcon)
+                .accessibilityHidden(true)
+            Text(summary.status)
+            if let countdown = summary.statusCountdown {
+                Text(countdown)
+                    .monospacedDigit()
+                    .fontWeight(.medium)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(foreground)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(background, in: Capsule())
+        .fixedSize()
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -511,7 +596,7 @@ private struct FailureReasonPill: View {
     var body: some View {
         Label("\(run.state.displayName) · \(reason)", systemImage: "xmark.circle.fill")
             .font(.caption)
-            .foregroundStyle(.white)
+            .foregroundStyle(PillColors.failedText)
             .lineLimit(2)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
@@ -595,6 +680,51 @@ private struct CheckPills: View {
     }
 }
 
+private func elapsedText(_ duration: TimeInterval) -> String {
+    let seconds = max(0, Int(duration))
+    if seconds < 60 { return "\(seconds)s" }
+    if seconds < 3600 { return "\(seconds / 60)m" }
+    return "\(seconds / 3600)h \(seconds % 3600 / 60)m"
+}
+
+private struct ExecutionProgressView: View {
+    let progress: ExecutionProgress
+
+    private var title: String {
+        switch progress.phase {
+        case .possiblyStalled: "Possibly stalled"
+        case .quiet: "Running, but quiet"
+        case .starting: "Starting the command"
+        case .stopping: "Stopping the command"
+        case .running: progress.lastOutputAt == nil ? "Running · Waiting for first output" : "Running · Recent output"
+        }
+    }
+    var body: some View {
+        GroupBox(title) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Elapsed: \(elapsedText(progress.elapsed))")
+                if let output = progress.lastOutputAt {
+                    Text("Last output: \(elapsedText(progress.quietFor)) ago · \(timestamp(output, seconds: true))")
+                } else {
+                    Text("No output yet · \(elapsedText(progress.quietFor)) since launch")
+                }
+                Text(progress.remaining > 0
+                    ? "About \(elapsedText(progress.remaining)) until the one-hour run limit"
+                    : "Run limit reached · Waiting for the scheduler to finish stopping the command")
+                if progress.phase == .possiblyStalled {
+                    Text("Output has stopped for a while. A long remote operation can be quiet; inspect its status, or stop this run and review it before retrying.")
+                }
+                if progress.phase == .quiet || progress.phase == .possiblyStalled {
+                    Text("Wake notifications and a running scheduler do not count as task progress.")
+                        .font(.caption)
+                }
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 private struct TaskPauseButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
@@ -641,8 +771,11 @@ private struct TaskRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if summary.quietAfterWake {
-                Text("No new output since waking · Check run progress")
+            if let progress = summary.progress {
+                Text("Elapsed \(elapsedText(progress.elapsed)) · \(progress.lastOutputAt == nil ? "No output yet" : "Last output " + elapsedText(progress.quietFor) + " ago")")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if summary.pending != nil {
+                Text(summary.pendingExplanation ?? "Queued · Waiting to start")
                     .font(.caption).foregroundStyle(.secondary)
             }
             CheckPills(summary: summary)
@@ -714,9 +847,8 @@ private struct TaskDetail: View {
                         Text("Resumed after sleep at \(timestamp(wake, seconds: true))")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    if summary.quietAfterWake {
-                        Text("No new output since waking. The command may still be working; check its logs before stopping.")
-                            .font(.caption).foregroundStyle(.secondary)
+                    if let progress = summary.progress {
+                        ExecutionProgressView(progress: progress)
                     }
                     Button {
                         isStopping = true
@@ -815,7 +947,7 @@ private struct TaskDetail: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                GroupBox("Pending work") {
+                GroupBox("Queued work") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(summary.pendingText).fontWeight(.medium)
                         ForEach(summary.pendingRuns) { pending in
@@ -825,7 +957,7 @@ private struct TaskDetail: View {
                                     Text("Combines \(pending.occurrenceCount) missed occurrences")
                                 }
                                 if let blocker = pending.blockerReason {
-                                    Label("Waiting for checks", systemImage: "clock")
+                                    Label(summary.pendingExplanation ?? "Queued · Waiting for readiness", systemImage: "clock")
                                         .foregroundStyle(.secondary)
                                     Text("This run stays queued and starts automatically when ready.")
                                         .font(.caption).foregroundStyle(.secondary)
@@ -835,16 +967,13 @@ private struct TaskDetail: View {
                                     Text("Last checked \(timestamp(checkedAt, seconds: true))")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
-                                    if let next = pending.nextCheckAt {
-                                        Text("Next check \(timestamp(next, seconds: true))")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    } else {
-                                        Text("Rechecks on the next scheduler scan")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if summary.pending != nil {
+                            Text(summary.nextAttemptDescription)
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -871,7 +1000,7 @@ private struct TaskDetail: View {
                     Divider()
                     Text("Selected run")
                         .font(.title2)
-                    Text("\(selectedRun.state.displayName) · \(runTimeLabel(selectedRun)) \(timestamp(selectedRun.firstScheduledAt, seconds: true))")
+                    Text("\(selectedRun.state == .pending ? "Queued" : selectedRun.state.displayName) · \(runTimeLabel(selectedRun)) \(timestamp(selectedRun.firstScheduledAt, seconds: true))")
                     if let blocker = selectedRun.blockerReason {
                         WaitingDetails(message: blocker)
                     }
@@ -911,7 +1040,7 @@ private struct RunRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text(run.state.displayName)
+                Text(run.state == .pending ? "Queued" : run.state.displayName)
                     .fontWeight(.medium)
                 Text("\(runTimeLabel(run)) \(timestamp(run.firstScheduledAt))")
                     .foregroundStyle(.secondary)

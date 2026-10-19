@@ -29,7 +29,10 @@ identify an older service during development updates.
 
 The sidebar's Later Today status describes a future occurrence in the schedule's
 zone, not a durable pending run or yesterday's success. Pending work shows neutral
-Waiting with check pills, not repeated sign-in alerts. Per-check results are
+Queued with check pills, not repeated sign-in alerts. Status pills show a compact
+countdown (1h 10m, 5m, or < 1m) without hover or click interactions. Details retain
+the next readiness-check time or explain a pause/worker hold; the countdown does
+not promise an execution attempt. Per-check results are
 saved for the current scan; later checks skipped after a blocker show Not checked.
 Running older records without individual results can indicate checks passed at
 launch, but this is not a live recheck. Failure/cancellation explanations remain
@@ -37,8 +40,11 @@ separate from normal waiting and from the last successful run.
 
 Execution has a fixed one-hour continuous-time deadline including sleep. Clock
 sampling detects sleep during active commands, records waking, and checks the
-deadline on resume. A quiet-after-wake notice after two minutes without new output
-is informational, not proof of a hang. Stop/timeout allows one second of cleanup
+deadline on resume. Output-freshness indicators show Running · Quiet after two
+minutes without output and Possibly stalled after ten minutes, independent of
+sleep. Repeated wakes never reset the output timer. Elapsed time, last output age,
+and an approximate deadline countdown distinguish execution from pending work;
+these indicators are informational, not proof of a hang. Stop/timeout allows one second of cleanup
 for the verified isolated local process group before forcing remaining members
 to exit; unverified isolation falls back to parent-only termination. Detached
 children and remote jobs are not reconciled. Stop records Cancelled, deadline

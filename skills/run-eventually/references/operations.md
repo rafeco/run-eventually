@@ -8,8 +8,13 @@ not imply equivalent CLI commands exist.
 
 - **Later Today** means the scheduled time has not arrived in the schedule's zone.
   It is a display status, not a queued run. Last successful run is separate history.
-- **Waiting** is an ordinary pending state, including morning sign-in delay.
-  Read Waiting details for the actual readiness category and corrective action.
+- **Queued** means due work is saved and has not started, including morning
+  sign-in or network delay. Status pills show a compact countdown to the next
+  readiness check (5m, < 1m); Later Today can show 1h 10m until the scheduled time.
+  Pills are not interactive. Queued work details show full check timing. Pauses or an occupied
+  worker explain the hold instead of promising an execution time. Read Waiting
+  details for the actual readiness category and corrective action. Per-check
+  Waiting labels do not mean that the run is missing from the queue.
 - Sidebar check pills appear only for pending work. Passed results belong to the
   current scan; Not checked means a prior blocker prevented reaching that check.
   Running older records may show Passed in details based on admission, without a
@@ -43,8 +48,12 @@ scheduler or invoke live `tick` as a health check.
 
 The preview's fixed one-hour command deadline includes sleep. Waking during
 execution is recorded; a deadline crossed during sleep is enforced on resume.
-Two minutes without new output since waking produces an informational notice.
-Silence alone does not prove a hang: a remote query or a program buffering its output
+The UI shows elapsed time and last output age, with Running · Quiet after two
+minutes without output and Possibly stalled after ten minutes. These thresholds
+apply without requiring sleep; wake events never count as progress or reset the
+quiet timer. Run details show an approximate deadline countdown. Pending tasks
+state that they have not started and can explicitly identify waiting for the
+single worker rather than a credential check. Silence alone does not prove a hang: a remote query or a program buffering its output
 can be legitimate. Inspect the run's log timestamps, current command, and any
 remote job status before diagnosing a stall.
 

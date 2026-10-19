@@ -33,7 +33,10 @@ when introducing the service.
 Standard network/VPN, SSH, Smallstep certificate, and BigQuery providers are configured with `add-check`.
 All standard checks and the legacy custom check must pass before launch. Provider
 results distinguish Waiting, Action required, and Check error. The app presents
-sign-in delays as neutral Waiting; per-check observations on pending runs support
+due, unstarted work as Queued (with Waiting on individual checks). The status
+pill shows a compact countdown to the next readiness check or future schedule.
+Pills have no hover/click action; details explain timing and scheduling holds;
+per-check observations on pending runs support
 pills without inferring success for unvisited checks. Raw probe output
 must never enter Activity or run logs. Standard checks inherit the task context,
 back off on failure, and can be rechecked without queuing a new run. Readiness

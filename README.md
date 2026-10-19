@@ -119,8 +119,13 @@ reuse yesterday's success as today's status. The last successful run is shown
 separately. Running jobs from older scheduler versions show checks as **Passed**
 at launch when individual results were not recorded.
 
-The app presents pending work as **Waiting**, with compact Network, SSH, and
-Google Cloud pills showing the latest per-check result. A check skipped because
+The app labels due, unstarted work **Queued**, including when it is waiting for
+sign-in or the network. Status pills show a compact countdown, such as
+**Queued 5m**, **Queued < 1m**, or **Later Today 1h 10m**. Pills are not interactive;
+the Queued work details retain the full next-readiness-check time. Pauses, a stopped
+scheduler, or an occupied execution worker show the condition that must clear
+instead of promising an execution time. A readiness check is not a task retry.
+Compact Network, SSH, and Google Cloud pills show the latest per-check result. A check skipped because
 an earlier prerequisite blocked the scan shows **Not checked**, never an assumed
 success. Sign-in instructions and diagnostic details are available under
 **Waiting details**; waiting is an ordinary queued state. The CLI and scheduler
@@ -150,9 +155,14 @@ otherwise running scheduler has paused. Older services advertise their capabilit
 a requested global pause takes effect when the updated service starts.
 
 Task deadlines use a continuous clock: the one-hour run limit includes laptop
-sleep. Waking is recorded in Activity and run details. After two minutes without
-new output following a wake, the app shows a quiet-progress notice. Quiet output
-alone does not prove a stalled command and does not trigger an automatic retry.
+sleep. Waking is recorded in Activity and run details. The sidebar and run details
+show elapsed time and time since the last stdout/stderr output. Two minutes
+without output shows **Running · Quiet**; ten minutes shows **Possibly stalled**,
+even if no sleep occurred. Wake events do not count as progress or reset these
+thresholds. Run details show the approximate time remaining before the one-hour
+limit. These are output-freshness indicators, not proof of a hang, and do not
+trigger automatic cancellation or retry. Pending tasks explicitly say they have
+not started, including when they are waiting for the single execution worker.
 
 **Stop run** asks the scheduler to signal the command's verified, isolated local
 process group, allowing one second of cleanup before forcing remaining local
@@ -165,8 +175,8 @@ Remote jobs can continue after local processes stop; inspect output before using
 command. The new stop control requires an updated scheduler.
 
 Check pills appear in the sidebar only while work is pending. Filled backgrounds
-use white text for ready/failed states and dark text for neutral waiting states.
-Failed or cancelled runs show a red reason pill; absent reasons are reported as
+use white text for ready states and dark text for neutral waiting states.
+Failed or cancelled runs show a muted rose reason pill with dark burgundy text; absent reasons are reported as
 unrecorded instead of inferred from arbitrary command output.
 
 ## Watching activity

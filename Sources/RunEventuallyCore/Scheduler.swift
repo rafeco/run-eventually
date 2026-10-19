@@ -143,9 +143,12 @@ public final class Scheduler {
                 try record(.scheduleChecked, "Schedule skipped because the task is paused.", taskID: task.id)
             } else {
                 let due = try store.materializeDue(taskID: task.id, through: now)
-                try record(.scheduleChecked, due == nil
-                    ? "Schedule checked; no new occurrences are due."
-                    : "Schedule checked; due work added to the queue.", taskID: task.id, runID: due?.id)
+                let alreadyQueued: Bool
+                if due == nil { alreadyQueued = try store.listRuns(taskID: task.id).contains { $0.state == .pending } }
+                else { alreadyQueued = false }
+                try record(.scheduleChecked, due != nil ? "Schedule checked; due work added to the queue."
+                    : alreadyQueued ? "Scheduled work is already queued; no additional occurrence is due."
+                    : "No additional occurrence is due; no work is queued.", taskID: task.id, runID: due?.id)
             }
         }
 
