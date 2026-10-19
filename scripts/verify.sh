@@ -25,3 +25,4 @@ fi
 
 swift run --disable-sandbox run-eventually-verify
 /usr/bin/python3 scripts/test-dev-restart.py
+/usr/bin/python3 -B scripts/test-scp-progress.py

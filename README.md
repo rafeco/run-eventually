@@ -208,6 +208,24 @@ by older versions cannot be recovered. Log files currently require manual
 retention. Python tasks default to unbuffered output unless the task explicitly
 sets `PYTHONUNBUFFERED`; other programs may need their own flushing options.
 
+SCP normally hides its progress meter when output goes to a log. For scheduled
+uploads, use `python3 /path/to/run-eventually/scripts/scp-progress.py SOURCE HOST:DEST`
+in the task's script. This captures SCP's percentage, transferred size, speed,
+ETA, and any `stalled` indication as readable stdout lines; errors remain in
+stderr. It uses batch authentication, a ten-second connection timeout, and SSH
+keepalives (15-second intervals, three unanswered probes). Keepalives detect an
+unresponsive connection, not a slow or blocked remote disk. The overall run
+deadline still applies. Do not pass `-q` if you want progress. This helper is for
+client transfers, not an SCP server or an interactive terminal.
+
+Repeated meter updates with unchanged transferred size are omitted so a stalled
+transfer cannot indefinitely reset the app's last-output timer. A 100% meter
+does not mean the command or deployment has finished: wait for `SCP: completed`
+and the task's final result. Stop/timeout is relayed to the helper's separate
+terminal process group, including local SSH children; remote work may remain.
+Both dashboard examples use the helper. Already running transfers keep their
+original output configuration; the change takes effect on the next upload.
+
 Existing tasks are preserved when the activity table is added. An already running
 older scheduler must be restarted with the new executable before it emits activity;
 wait for active tasks to finish before replacing or restarting it.

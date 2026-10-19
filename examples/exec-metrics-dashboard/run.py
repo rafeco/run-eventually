@@ -5,6 +5,7 @@ from pathlib import Path
 import shlex
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import uuid
 
@@ -39,8 +40,8 @@ def main():
             digest = checksum.hexdigest()
         incoming = f".metrics-{uuid.uuid4().hex}.db"
         print("Uploading validated database snapshot", flush=True)
-        subprocess.run(["/usr/bin/scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+        progress = Path(__file__).resolve().parents[2] / "scripts" / "scp-progress.py"
+        subprocess.run([sys.executable, "-B", str(progress),
                         str(database), f"{args.host}:exec-metrics-dashboard/{incoming}"], check=True)
         remote = Path(__file__).with_name("remote.py").read_text()
         command = "python3 - " + shlex.join([incoming, digest])

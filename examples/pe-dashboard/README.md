@@ -70,6 +70,12 @@ For SSH, connect and renew work SSH credentials using the normal company process
 Test `ssh -o BatchMode=yes 10.248.22.135 true` afterward. Approve a first-time host
 key in Terminal only after verifying it normally. This example honors the existing managed SSH host-verification settings. Its `bin/ssh` and `bin/scp` wrappers enforce batch mode during
 the pipeline, so unattended work fails rather than waiting for a password.
+Both wrappers also use SSH keepalives. The SCP wrapper calls
+[`scripts/scp-progress.py`](../../scripts/scp-progress.py), so subsequent uploads
+show SCP's percentage, bytes, speed, and ETA in the app's live stdout log.
+Unchanged progress is suppressed; SCP errors remain in stderr. A 100% meter is
+not a deployment success: the transfer must exit successfully and the remote
+deployment commands must finish. Existing in-flight uploads are unaffected.
 
 ## Configure and start
 

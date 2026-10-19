@@ -18,6 +18,13 @@ Python directly, and checks `/healthz`. Startup failure restores the previous DB
 and attempts to restart it. An unmanaged listener on port 8088 blocks deployment;
 stop the manually launched dashboard before the first scheduled deployment.
 
+Uploads use [`scripts/scp-progress.py`](../../scripts/scp-progress.py) to show
+SCP's percentage, bytes, speed, ETA, and stalled indication in live stdout,
+with errors in stderr. It retains batch authentication and SSH keepalives;
+no interactive login is supplied. Repeated unchanged progress is suppressed so
+the app can still flag prolonged silence. The final transfer result and remote
+validation determine success, not the meter reaching 100%.
+
 Inspect with `ssh vm 'tmux attach -t exec-metrics-dashboard'` and
 `ssh vm 'tail -50 ~/exec-metrics-dashboard/dashboard.log'`. The task does not pull
 code, sync dependencies, start a stopped VM, or perform Google login. Readiness

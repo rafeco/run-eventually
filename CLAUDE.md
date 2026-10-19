@@ -52,6 +52,14 @@ macOS is the only current target. Keep implementation in Swift. Cross-task
 dependencies belong in creator-supplied scripts or Make targets rather than a
 workflow graph in this app. General interactive terminal sessions are deferred.
 
+`scripts/scp-progress.py` is a scoped batch SCP helper used by the dashboard
+examples. It supplies a terminal for SCP stdout, emits progress as log lines,
+preserves separate stderr, and suppresses unchanged-byte meter refreshes so
+idle detection remains useful. Its terminal child owns a separate session;
+relay Stop/timeout to that local group and bound forced cleanup within the
+scheduler's one-second grace period. Keep stdin closed and authentication batch
+only. Verify with `scripts/test-scp-progress.py` (local transfer, no network).
+
 ## Scheduling invariants
 
 - A scheduled time makes work due; failed prerequisite checks retain pending work.
