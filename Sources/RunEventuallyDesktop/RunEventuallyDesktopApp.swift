@@ -115,6 +115,16 @@ private struct TaskSummary: Identifiable, Sendable {
         default: "\(pendingRuns.count) queued runs"
         }
     }
+    var commandText: String {
+        let unquoted = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:@%+=,-")
+        return ([task.command.executable] + task.command.arguments).map { argument in
+            if !argument.isEmpty && argument.rangeOfCharacter(from: unquoted.inverted) == nil {
+                return argument
+            }
+            return "'" + argument.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        }.joined(separator: " ")
+    }
+
     var workingDirectoryText: String {
         task.command.workingDirectory ?? "Not specified; inherits scheduler working directory"
     }
@@ -667,11 +677,52 @@ private struct CheckPill: View {
     }
 }
 
+private struct ReadinessPillLayout: Layout {
+    private let spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrangement(subviews, width: proposal.width ?? .infinity).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let layout = arrangement(subviews, width: bounds.width)
+        for (subview, origin) in zip(subviews, layout.origins) {
+            subview.place(
+                at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(subview.sizeThatFits(.unspecified))
+            )
+        }
+    }
+
+    private func arrangement(_ subviews: Subviews, width: CGFloat) -> (size: CGSize, origins: [CGPoint]) {
+        var origins: [CGPoint] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > width {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            origins.append(CGPoint(x: x, y: y))
+            usedWidth = max(usedWidth, x + size.width)
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+        }
+        return (CGSize(width: usedWidth, height: y + rowHeight), origins)
+    }
+}
+
 private struct CheckPills: View {
     let summary: TaskSummary
     var body: some View {
         if let pending = summary.pending, !(summary.task.readinessChecks?.isEmpty ?? true) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), alignment: .leading)], alignment: .leading, spacing: 4) {
+            ReadinessPillLayout {
                 ForEach(summary.task.readinessChecks ?? []) { check in
                     CheckPill(check: check, run: pending)
                 }
@@ -837,39 +888,82 @@ private struct TaskDetail: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(summary.task.name)
-                    .font(.largeTitle)
-                JobStatusBadge(summary: summary)
-                if let active = summary.active {
-                    if let wake = active.lastWakeAt {
-                        Text("Resumed after sleep at \(timestamp(wake, seconds: true))")
-                            .font(.caption).foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            taskHeader
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Runs")
+                        .font(.title2)
+                    if summary.runs.isEmpty {
+                        Text("No runs recorded yet")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        runsTable
                     }
-                    if let progress = summary.progress {
-                        ExecutionProgressView(progress: progress)
-                    }
-                    Button {
-                        isStopping = true
-                        Task {
-                            defer { isStopping = false }
-                            do {
-                                try await model.stopRun(runID: active.id)
-                                requestFailed = false
-                                requestMessage = "Stop requested. The command has a short cleanup period; retry with Run now after it stops."
-                            } catch {
-                                requestFailed = true
-                                requestMessage = error.localizedDescription
+
+                    if let selectedRun {
+                        Divider()
+                        Text("Selected run")
+                            .font(.title2)
+                        Text("\(selectedRun.state == .pending ? "Queued" : selectedRun.state.displayName) · \(runTimeLabel(selectedRun)) \(timestamp(selectedRun.firstScheduledAt, seconds: true))")
+                        if selectedRun.id == summary.active?.id {
+                            if let wake = selectedRun.lastWakeAt {
+                                Text("Resumed after sleep at \(timestamp(wake, seconds: true))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            if let progress = summary.progress {
+                                ExecutionProgressView(progress: progress)
                             }
                         }
-                    } label: {
-                        Label(active.stopRequestedAt == nil ? "Stop run" : "Stopping…", systemImage: "stop")
+                        if let blocker = selectedRun.blockerReason {
+                            WaitingDetails(message: blocker)
+                        }
+                        if selectedRun.state == .pending {
+                            if selectedRun.occurrenceCount > 1 {
+                                Text("Combines \(selectedRun.occurrenceCount) missed occurrences")
+                            }
+                            if let checkedAt = selectedRun.lastCheckedAt {
+                                Text("Last checked \(timestamp(checkedAt, seconds: true))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        if selectedRun.trigger == .manual {
+                            Text("Requested with Run now")
+                        } else if selectedRun.trigger == .scheduledAndManual {
+                            Text("Combines a manual request with scheduled work")
+                        }
+                        if let startedAt = selectedRun.startedAt {
+                            Text("Started \(timestamp(startedAt, seconds: true))")
+                        }
+                        if let finishedAt = selectedRun.finishedAt {
+                            Text("Finished \(timestamp(finishedAt, seconds: true))")
+                        }
+                        if selectedRun.occurrenceCount > 1 {
+                            Text("Last scheduled occurrence \(timestamp(selectedRun.lastScheduledAt, seconds: true))")
+                        }
+                        if let exitCode = selectedRun.exitCode {
+                            Text("Exit code \(exitCode)")
+                        }
+                        LogView(title: "Standard output", content: selectedRun.standardOutput,
+                            path: selectedRun.standardOutputPath, running: selectedRun.state == .running)
+                        LogView(title: "Standard error", content: selectedRun.standardError,
+                            path: selectedRun.standardErrorPath, running: selectedRun.state == .running)
                     }
-                    .disabled(isStopping || active.state != .running || active.stopRequestedAt != nil || !model.canStopRun)
-                    .help(model.canStopRun ? "Stop this command and its local child processes. Remote work may continue; review logs before retrying."
-                        : "Stop run requires the updated scheduler. The current operation is finishing before the update takes over.")
+
+                    Divider()
+                    taskDetails
                 }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var taskHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
                 Button {
                     isRequestingRun = true
                     requestMessage = nil
@@ -892,175 +986,195 @@ private struct TaskDetail: View {
                 }
                 .disabled(isRequestingRun || model.schedulerPaused || summary.task.isPaused || summary.active != nil || summary.lastResult?.state == .outcomeUnknown)
                 .help("Queue a run using the existing prerequisites. Reuse pending work; resume paused tasks first.")
-                if let requestMessage {
-                    Text(requestMessage)
-                        .font(.callout)
-                        .foregroundStyle(requestFailed ? Color.red : Color.secondary)
-                }
-                Text(summary.scheduleText)
-                    .foregroundStyle(.secondary)
-                GroupBox("Execution") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Command").font(.caption).foregroundStyle(.secondary)
-                        Text(summary.task.command.executable + " " + summary.task.command.arguments.joined(separator: " "))
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                        Text("Working directory").font(.caption).foregroundStyle(.secondary)
-                        Text(summary.workingDirectoryText)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
+                if let active = summary.active {
+                    Button {
+                        isStopping = true
+                        Task {
+                            defer { isStopping = false }
+                            do {
+                                try await model.stopRun(runID: active.id)
+                                requestFailed = false
+                                requestMessage = "Stop requested. The command has a short cleanup period; retry with Run now after it stops."
+                            } catch {
+                                requestFailed = true
+                                requestMessage = error.localizedDescription
+                            }
+                        }
+                    } label: {
+                        Label(active.stopRequestedAt == nil ? "Stop run" : "Stopping…", systemImage: "stop")
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .disabled(isStopping || active.state != .running || active.stopRequestedAt != nil || !model.canStopRun)
+                    .help(model.canStopRun ? "Stop this command and its local child processes. Remote work may continue; review logs before retrying."
+                        : "Stop run requires the updated scheduler. The current operation is finishing before the update takes over.")
                 }
-                GroupBox("Readiness checks") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(summary.task.readinessChecks ?? []) { check in
-                            VStack(alignment: .leading, spacing: 4) {
-                                CheckPill(check: check, run: summary.checkRun)
-                                Text(check.provider.description)
-                                    .font(.caption).foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
+                if summary.pending?.blockerReason != nil {
+                    Button(isRechecking ? "Requesting…" : "Recheck") {
+                        isRechecking = true
+                        Task {
+                            defer { isRechecking = false }
+                            do {
+                                try await model.recheck(taskID: summary.id)
+                                requestFailed = false
+                                requestMessage = "Readiness will be checked on the next scheduler scan."
+                            } catch {
+                                requestFailed = true
+                                requestMessage = error.localizedDescription
                             }
-                            .help("Timeout: \(Int(check.timeoutSeconds)) seconds")
-                        }
-                        if summary.task.check != nil { Text("Custom command check (also required)") }
-                        if (summary.task.readinessChecks?.isEmpty ?? true) && summary.task.check == nil {
-                            Text("No readiness checks configured").foregroundStyle(.secondary)
-                        }
-                        if summary.pending?.blockerReason != nil {
-                            Button(isRechecking ? "Requesting…" : "Recheck") {
-                                isRechecking = true
-                                Task {
-                                    defer { isRechecking = false }
-                                    do {
-                                        try await model.recheck(taskID: summary.id)
-                                        requestFailed = false
-                                        requestMessage = "Readiness will be checked on the next scheduler scan."
-                                    } catch {
-                                        requestFailed = true
-                                        requestMessage = error.localizedDescription
-                                    }
-                                }
-                            }
-                            .disabled(isRechecking || model.schedulerPaused || summary.task.isPaused)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .disabled(isRechecking || model.schedulerPaused || summary.task.isPaused)
                 }
-                GroupBox("Queued work") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(summary.pendingText).fontWeight(.medium)
-                        ForEach(summary.pendingRuns) { pending in
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("\(runTimeLabel(pending)) \(timestamp(pending.firstScheduledAt))")
-                                if pending.occurrenceCount > 1 {
-                                    Text("Combines \(pending.occurrenceCount) missed occurrences")
-                                }
-                                if let blocker = pending.blockerReason {
-                                    Label(summary.pendingExplanation ?? "Queued · Waiting for readiness", systemImage: "clock")
-                                        .foregroundStyle(.secondary)
-                                    Text("This run stays queued and starts automatically when ready.")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                    WaitingDetails(message: blocker)
-                                }
-                                if let checkedAt = pending.lastCheckedAt {
-                                    Text("Last checked \(timestamp(checkedAt, seconds: true))")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        if summary.pending != nil {
-                            Text(summary.nextAttemptDescription)
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                Spacer(minLength: 0)
+            }
+            .controlSize(.small)
 
-                Divider()
-                Text("Runs")
-                    .font(.title2)
-                if summary.runs.isEmpty {
-                    Text("No runs recorded yet")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(summary.runs.reversed()) { run in
-                        Button {
-                            selectedRunID = run.id
-                        } label: {
-                            RunRow(run: run, isSelected: selectedRun?.id == run.id)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(summary.task.name)
+                    .font(.title2.weight(.semibold))
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+                Spacer(minLength: 0)
+                JobStatusBadge(summary: summary)
+            }
 
-                if let selectedRun {
-                    Divider()
-                    Text("Selected run")
-                        .font(.title2)
-                    Text("\(selectedRun.state == .pending ? "Queued" : selectedRun.state.displayName) · \(runTimeLabel(selectedRun)) \(timestamp(selectedRun.firstScheduledAt, seconds: true))")
-                    if let blocker = selectedRun.blockerReason {
-                        WaitingDetails(message: blocker)
+            if !(summary.task.readinessChecks?.isEmpty ?? true) {
+                ReadinessPillLayout {
+                    ForEach(summary.task.readinessChecks ?? []) { check in
+                        CheckPill(check: check, run: summary.checkRun)
                     }
-                    if selectedRun.trigger == .manual {
-                        Text("Requested with Run now")
-                    } else if selectedRun.trigger == .scheduledAndManual {
-                        Text("Combines a manual request with scheduled work")
-                    }
-                    if let startedAt = selectedRun.startedAt {
-                        Text("Started \(timestamp(startedAt, seconds: true))")
-                    }
-                    if let finishedAt = selectedRun.finishedAt {
-                        Text("Finished \(timestamp(finishedAt, seconds: true))")
-                    }
-                    if selectedRun.occurrenceCount > 1 {
-                        Text("Last scheduled occurrence \(timestamp(selectedRun.lastScheduledAt, seconds: true))")
-                    }
-                    if let exitCode = selectedRun.exitCode {
-                        Text("Exit code \(exitCode)")
-                    }
-                    LogView(title: "Standard output", content: selectedRun.standardOutput,
-                        path: selectedRun.standardOutputPath, running: selectedRun.state == .running)
-                    LogView(title: "Standard error", content: selectedRun.standardError,
-                        path: selectedRun.standardErrorPath, running: selectedRun.state == .running)
                 }
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            if let progress = summary.progress {
+                Text("Elapsed \(elapsedText(progress.elapsed)) · \(progress.lastOutputAt == nil ? "No output yet" : "Last output " + elapsedText(progress.quietFor) + " ago") · \(progress.remaining > 0 ? elapsedText(progress.remaining) + " remaining" : "Run limit reached")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if summary.pending != nil {
+                Text(summary.pendingText + " · " + (summary.pendingExplanation ?? "Waiting to start"))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(summary.nextAttemptDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let requestMessage {
+                Text(requestMessage)
+                    .font(.caption)
+                    .foregroundStyle(requestFailed ? Color.red : Color.secondary)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background)
+    }
+
+    private var runsTable: some View {
+        GeometryReader { geometry in
+            ScrollView(.horizontal) {
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        Text("Status")
+                            .frame(width: 110, alignment: .leading)
+                        Text("Due / requested")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("Finished")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(.quaternary.opacity(0.5))
+                    Divider()
+                    ScrollView(.vertical) {
+                        LazyVStack(spacing: 0) {
+                            ForEach(summary.runs.reversed()) { run in
+                                Button {
+                                    selectedRunID = run.id
+                                } label: {
+                                    runTableRow(run)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityAddTraits(selectedRun?.id == run.id ? .isSelected : [])
+                            }
+                        }
+                    }
+                }
+                .frame(width: max(geometry.size.width, 440))
+            }
+        }
+        .font(.caption)
+        .frame(height: min(240, 30 + CGFloat(summary.runs.count) * 28))
+        .overlay(Rectangle().strokeBorder(.separator, lineWidth: 1))
+    }
+
+    private func runTableRow(_ run: RunRecord) -> some View {
+        let isSelected = selectedRun?.id == run.id
+        return HStack(spacing: 12) {
+            HStack(spacing: 4) {
+                Text(run.state == .pending ? "Queued" : run.state.displayName)
+                if run.occurrenceCount > 1 {
+                    Text("×\(run.occurrenceCount)")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 110, alignment: .leading)
+            .help(run.state == .pending ? "Queued" : run.state.displayName)
+            Text(timestamp(run.firstScheduledAt))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help("\(runTimeLabel(run)) \(timestamp(run.firstScheduledAt, seconds: true))")
+            Text(run.finishedAt.map { timestamp($0) } ?? "—")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .lineLimit(1)
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .frame(maxWidth: .infinity)
+        .background(runRowColor(run))
+        .overlay(Rectangle().strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 2))
+        .contentShape(Rectangle())
+    }
+
+    private func runRowColor(_ run: RunRecord) -> Color {
+        switch run.state {
+        case .succeeded: .green.opacity(0.12)
+        case .failed, .cancelled, .outcomeUnknown: .red.opacity(0.12)
+        default: .clear
         }
     }
-}
 
-private struct RunRow: View {
-    let run: RunRecord
-    let isSelected: Bool
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(run.state == .pending ? "Queued" : run.state.displayName)
-                    .fontWeight(.medium)
-                Text("\(runTimeLabel(run)) \(timestamp(run.firstScheduledAt))")
-                    .foregroundStyle(.secondary)
-                if let finishedAt = run.finishedAt {
-                    Text("Finished \(timestamp(finishedAt))")
-                        .foregroundStyle(.secondary)
-                } else if let startedAt = run.startedAt {
-                    Text("Started \(timestamp(startedAt))")
-                        .foregroundStyle(.secondary)
+    private var taskDetails: some View {
+        DisclosureGroup("Task details") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Schedule").font(.caption).foregroundStyle(.secondary)
+                Text(summary.scheduleText)
+                Text("Command").font(.caption).foregroundStyle(.secondary)
+                Text(verbatim: summary.commandText)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                Text("Working directory").font(.caption).foregroundStyle(.secondary)
+                Text(summary.workingDirectoryText)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                Text("Readiness checks").font(.caption).foregroundStyle(.secondary)
+                ForEach(summary.task.readinessChecks ?? []) { check in
+                    Text(check.provider.description)
+                        .textSelection(.enabled)
+                    Text("Timeout: \(Int(check.timeoutSeconds)) seconds")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if summary.task.check != nil {
+                    Text("Custom command check (also required)")
+                }
+                if (summary.task.readinessChecks?.isEmpty ?? true) && summary.task.check == nil {
+                    Text("No readiness checks configured").foregroundStyle(.secondary)
                 }
             }
-            Spacer()
-            if run.occurrenceCount > 1 {
-                Text("×\(run.occurrenceCount)")
-                    .foregroundStyle(.secondary)
-            }
+            .padding(.top, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(8)
-        .background(isSelected ? Color.accentColor.opacity(0.16) : Color.clear)
-        .cornerRadius(6)
     }
 }
 

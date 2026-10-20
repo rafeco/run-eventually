@@ -119,10 +119,19 @@ reuse yesterday's success as today's status. The last successful run is shown
 separately. Running jobs from older scheduler versions show checks as **Passed**
 at launch when individual results were not recorded.
 
+The task detail pane keeps actions, status, readiness pills, and a brief queue or
+execution summary visible in a fixed header while you scroll. **Runs** is a compact,
+selectable table with the newest runs first; longer histories scroll within the
+table. Successful rows have light green shading; failed, cancelled, and unknown
+outcomes have light red shading. An accent outline marks the selected row.
+The selected run shows timing, diagnostics, and output below it. Expand
+**Task details** at the bottom for the schedule, command (including arguments),
+working directory, and readiness configuration.
+
 The app labels due, unstarted work **Queued**, including when it is waiting for
 sign-in or the network. Status pills show a compact countdown, such as
 **Queued 5m**, **Queued < 1m**, or **Later Today 1h 10m**. Pills are not interactive;
-the Queued work details retain the full next-readiness-check time. Pauses, a stopped
+the task header retains the full next-readiness-check time. Pauses, a stopped
 scheduler, or an occupied execution worker show the condition that must clear
 instead of promising an execution time. A readiness check is not a task retry.
 Compact Network, SSH, and Google Cloud pills show the latest per-check result. A check skipped because
